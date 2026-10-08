@@ -11,11 +11,9 @@ import type {
 
 import type { envelopeSettings } from "../shared/settings";
 import { parseEnvFile } from "./env-file";
+import { errorCode, errorName, isRecord, withTimeout } from "./errors";
 
 const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
-// Values must never reach logs, even through a crafted error, so only identifier-shaped names and codes are logged.
-const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/u;
-const ERROR_CODE = /^E[A-Z0-9]{1,31}$/u;
 
 export type EnvelopeSettingsState = PluginSettingsState<typeof envelopeSettings.schema>;
 
@@ -39,30 +37,6 @@ export interface InjectEnvContext {
     providers: { snapshot(): Promise<{ entries: unknown }> };
   };
   signal: PluginHookContext["signal"];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Reads `error[key]`, or undefined when a crafted getter or proxy throws. */
-function readField(error: object, key: string): unknown {
-  try {
-    return Reflect.get(error, key);
-  } catch {
-    return undefined;
-  }
-}
-
-function errorName(error: unknown): string {
-  if (!(error instanceof Error)) return "UnknownError";
-  const name = readField(error, "name");
-  return typeof name === "string" && ERROR_NAME.test(name) ? name : "Error";
-}
-
-function errorCode(error: unknown): string {
-  const code = isRecord(error) ? readField(error, "code") : undefined;
-  return typeof code === "string" && ERROR_CODE.test(code) ? code : "UNKNOWN";
 }
 
 function isProtected(key: string): boolean {
@@ -139,42 +113,6 @@ export function providerEnvKeys(
     id = !builtins.has(id) && typeof base === "string" && base !== "acp" ? base : undefined;
   }
   return keys;
-}
-
-/**
- * Settles with `promise`, or rejects on timeout or when `signal` aborts, clearing the timer either way. It stops waiting rather than cancel: a libuv thread blocked on a stalled mount can't be interrupted. The timeout error has name `TimeoutError` and code `ETIMEDOUT`, so both log shapes can name it.
- */
-function withTimeout<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const settle = (finish: () => void) => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      finish();
-    };
-    const onAbort = () => {
-      const reason: unknown = signal?.reason;
-      settle(() => reject(reason));
-    };
-    const timer = setTimeout(
-      () =>
-        settle(() =>
-          reject(
-            Object.assign(new Error("timed out"), { name: "TimeoutError", code: "ETIMEDOUT" }),
-          ),
-        ),
-      ms,
-    );
-    // Observe `promise` first, so a rejection after an early abort is never left unhandled.
-    promise.then(
-      (value) => settle(() => resolve(value)),
-      (error: unknown) => settle(() => reject(error)),
-    );
-    if (signal?.aborted === true) {
-      onAbort();
-      return;
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 /** The provider ids the snapshot marks built-in. Throws a TypeError when the snapshot is malformed. */
