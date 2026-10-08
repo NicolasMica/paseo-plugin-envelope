@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 
 import contribute from "../index.server";
 import { envelopeSettings } from "../shared/settings";
@@ -23,7 +23,7 @@ import {
 // Pass-through by default, so a test can make one `open` fail in a way the real filesystem can't.
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, open: vi.fn(actual.open) };
+  return { ...actual, open: vi.fn<typeof actual.open>(actual.open) };
 });
 
 const noop = () => {};
@@ -122,7 +122,10 @@ function contextWith(
 }
 
 function makeContext(providers: unknown = {}, signal = new AbortController().signal) {
-  const get = vi.fn(async () => ({ requestId: "r", config: { providers } as unknown }));
+  const get = vi.fn<() => Promise<{ requestId: string; config: unknown }>>(async () => ({
+    requestId: "r",
+    config: { providers },
+  }));
   return { context: contextWith(get, signal), get };
 }
 
@@ -725,7 +728,7 @@ describe("config.get failures", () => {
   it("injects nothing and logs the error name when config.get rejects", async () => {
     await writeEnv("A=1");
     const request = makeRequest();
-    const get = vi.fn(async () => {
+    const get = vi.fn<Get>(async () => {
       throw new RangeError("boom");
     });
 
@@ -829,7 +832,7 @@ describe("config.get failures", () => {
   it("stops when the hook signal is already aborted", async () => {
     await writeEnv("A=1");
     const request = makeRequest();
-    const get = vi.fn(() => new Promise<never>(noop));
+    const get = vi.fn<Get>(() => new Promise<never>(noop));
 
     const result = await makeHook()({ request }, contextWith(get, AbortSignal.abort()));
 
@@ -902,12 +905,14 @@ describe("registration", () => {
     spyOnOutput();
     const custom = join(xdg, "custom.env");
     await writeFile(custom, "A=1", { mode: 0o600 });
-    const remove = vi.fn();
-    const before = vi.fn(
-      (_event: string, _hook: ReturnType<typeof createSessionOpenHook>) => remove,
+    const remove = vi.fn<() => void>();
+    const before =
+      vi.fn<(event: string, hook: ReturnType<typeof createSessionOpenHook>) => typeof remove>();
+    before.mockReturnValue(remove);
+    const read = vi.fn<() => Promise<EnvelopeSettingsState>>(ready(custom));
+    const registerSettings = vi.fn<() => { read: typeof read; subscribe: () => typeof noop }>(
+      () => ({ read, subscribe: () => noop }),
     );
-    const read = vi.fn(ready(custom));
-    const registerSettings = vi.fn(() => ({ read, subscribe: () => noop }));
     const server = malformed<Parameters<typeof contribute>[0]>({ before, registerSettings });
 
     const cleanup = contribute(server);
@@ -916,7 +921,7 @@ describe("registration", () => {
     expect(before).toHaveBeenCalledWith("agent.session_open", expect.any(Function));
     expect(cleanup).toBe(remove);
     const hook = before.mock.calls[0]?.[1];
-    if (hook === undefined) throw new Error("no hook registered");
+    assert.isDefined(hook, "no hook registered");
     const result = await hook({ request: makeRequest() }, makeContext().context);
     expect(read).toHaveBeenCalledOnce();
     expect(result.env).toEqual({ A: "1" });
@@ -1042,8 +1047,8 @@ describe("provider snapshot", () => {
 
   it("does not call the snapshot when no candidate remains", async () => {
     await writeEnv("PATH=1");
-    const get = vi.fn(async () => ({ config: {} }));
-    const snapshot = vi.fn(async () => BUILTIN_SNAPSHOT);
+    const get = vi.fn<Get>(async () => ({ config: {} }));
+    const snapshot = vi.fn<Snapshot>(async () => BUILTIN_SNAPSHOT);
 
     await makeHook()({ request: makeRequest() }, contextWith(get, undefined, snapshot));
 

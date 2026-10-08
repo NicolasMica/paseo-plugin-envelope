@@ -7,14 +7,14 @@
     "types": ["node"]
   },
   "include": [
-    "index.server.ts",
-    "index.server.tsx",
-    "server/**/*.ts",
-    "server/**/*.tsx",
-    "shared/**/*.ts",
-    "shared/**/*.tsx",
-    "**/*.test.ts",
-    "**/*.test.tsx",
-    "vitest.config.ts"
-  ]
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.mts",
+    "**/*.cts",
+    "**/*.js",
+    "**/*.jsx",
+    "**/*.mjs",
+    "**/*.cjs"
+  ],
+  "exclude": ["client/**", "index.client.*", "node_modules", "coverage"]
 }

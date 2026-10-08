@@ -5,7 +5,7 @@
     "denyWarnings": true,
     "reportUnusedDisableDirectives": "error"
   },
-  "plugins": ["unicorn", "typescript", "oxc", "import", "promise"],
+  "plugins": ["unicorn", "typescript", "oxc", "import", "promise", "vitest"],
   "categories": {
     "correctness": "error",
     "suspicious": "error",
@@ -82,11 +82,17 @@
         "minimumDescriptionLength": 10
       }
     ],
-    // Coverage ignore hints need an explicit, reasoned oxlint-disable, so untested code can't hide behind them.
+    // Any comment naming a coverage tool (v8, c8, istanbul, node:coverage) is flagged, whatever its spacing or casing, so an ignore hint needs an explicit, reasoned oxlint-disable.
     "no-warning-comments": [
       "error",
-      { "terms": ["v8 ignore", "istanbul ignore", "c8 ignore"], "location": "anywhere" }
+      { "terms": ["v8", "c8", "istanbul", "node:coverage"], "location": "anywhere" }
     ],
+
+    // A disable directive must name the rules it silences.
+    "unicorn/no-abusive-eslint-disable": "error",
+
+    "vitest/no-focused-tests": "error",
+    "vitest/no-disabled-tests": "error",
 
     "import/no-unassigned-import": "error",
 

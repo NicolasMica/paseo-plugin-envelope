@@ -2,16 +2,17 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    allowOnly: false,
     coverage: {
       provider: "v8",
-      include: [
-        "index.server.{ts,tsx}",
-        "index.client.{ts,tsx}",
-        "server/**/*.{ts,tsx}",
-        "client/**/*.{ts,tsx}",
-        "shared/**/*.{ts,tsx}",
+      include: ["**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"],
+      exclude: [
+        "**/*.test.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        "**/*.d.{ts,mts,cts}",
+        "**/*.config.*",
+        "coverage/**",
+        "node_modules/**",
       ],
-      exclude: ["**/*.test.{ts,tsx}"],
       thresholds: { 100: true },
     },
   },

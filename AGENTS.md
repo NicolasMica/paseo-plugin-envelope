@@ -9,7 +9,7 @@
 
 # Quality gates
 
-Every change keeps 100% test coverage and passes the strict gates: `npm run typecheck`, `npm run lint`, `npm run format:check` and `npm test` (CI and the pre-commit hook run the same). Fix the code or the tests; never lower a threshold, exclude a file, turn a rule off or add a suppression (`oxlint-disable`, `@ts-expect-error`, `v8 ignore`) to make a check pass. A suppression is only for code that genuinely can't satisfy a rule, with its reason on the same line (`// oxlint-disable-next-line <rule> -- <reason>`).
+Every change keeps 100% test coverage and passes the strict gates: `npm run typecheck`, `npm run lint`, `npm run format:check` and `npm test`. The pre-commit hook runs these same commands on the working tree; CI runs them on the pushed commit and is the authority. Branch protection isn't available on this private repo, so never merge a PR whose checks are red or pending, and never push straight to `main`. Fix the code or the tests; never lower a threshold, exclude a file, turn a rule off or add a suppression (`oxlint-disable`, `@ts-expect-error`, `v8 ignore`) to make a check pass. A suppression is only for code that genuinely can't satisfy a rule, with its reason on the same line (`// oxlint-disable-next-line <rule> -- <reason>`).
 
 # Project board
 
