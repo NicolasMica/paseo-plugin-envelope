@@ -5,6 +5,9 @@
   "scripts": {
     "typecheck": {
       "command": "npm run typecheck"
+    },
+    "lint": {
+      "command": "npm run lint"
     }
   }
 }
