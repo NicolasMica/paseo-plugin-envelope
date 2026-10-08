@@ -1,8 +1,7 @@
 {
   "name": "envelope",
-  "private": true,
   "version": "0.0.0",
-  "type": "module",
+  "private": true,
   "files": [
     "paseo-plugin.json",
     "OVERVIEW.md",
@@ -15,14 +14,25 @@
     "shared/",
     "!**/*.test.ts"
   ],
+  "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "format": "oxfmt .",
+    "format:files": "oxfmt",
+    "format:check": "oxfmt --check .",
+    "format:check:files": "oxfmt --check",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "prepare": "lefthook install"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.11.1",
     "@tanstack/react-query": "^5.90.11",
     "@types/node": "^24.0.0",
     "@types/react": "~19.2.0",
+    "lefthook": "^2.2.1",
+    "oxfmt": "^0.72.0",
+    "oxlint": "^1.87.0",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.9.3",
