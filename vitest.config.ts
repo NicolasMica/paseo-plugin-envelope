@@ -9,7 +9,7 @@ export default defineConfig({
       exclude: [
         "**/*.test.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
         "**/*.d.{ts,mts,cts}",
-        "**/*.config.*",
+        "*.config.*",
         "coverage/**",
         "node_modules/**",
       ],
