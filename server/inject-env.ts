@@ -10,13 +10,11 @@ import type {
 
 import type { envelopeSettings } from "../shared/settings";
 import { parseEnvFile } from "./env-file";
+import { errorCode, errorName, isRecord, withTimeout } from "./errors";
 import { SECRETS_GUIDELINE, hasSecretsGuideline } from "./guideline";
-import { readEnvFile, withTimeout, type EnvFile } from "./read-file";
+import { readEnvFile, type EnvFile } from "./read-file";
 
 const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
-// Values must never reach logs, even through a crafted error, so only identifier-shaped names and codes are logged.
-const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/u;
-const ERROR_CODE = /^E[A-Z0-9]{1,31}$/u;
 
 export type EnvelopeSettingsState = PluginSettingsState<typeof envelopeSettings.schema>;
 
@@ -43,30 +41,6 @@ export interface InjectEnvContext {
 }
 
 const noop = () => {};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Reads `error[key]`, or undefined when a crafted getter or proxy throws. */
-function readField(error: object, key: string): unknown {
-  try {
-    return Reflect.get(error, key);
-  } catch {
-    return undefined;
-  }
-}
-
-function errorName(error: unknown): string {
-  if (!(error instanceof Error)) return "UnknownError";
-  const name = readField(error, "name");
-  return typeof name === "string" && ERROR_NAME.test(name) ? name : "Error";
-}
-
-function errorCode(error: unknown): string {
-  const code = isRecord(error) ? readField(error, "code") : undefined;
-  return typeof code === "string" && ERROR_CODE.test(code) ? code : "UNKNOWN";
-}
 
 function isProtected(key: string): boolean {
   return PROTECTED_KEYS.has(key) || key.startsWith("PASEO_");

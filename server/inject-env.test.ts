@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 
 import contribute from "../index.server";
 import { envelopeSettings } from "../shared/settings";
@@ -1015,7 +1015,7 @@ describe("result", () => {
 });
 
 describe("registration", () => {
-  it("registers the settings document, both hooks on shared settings, and one cleanup", async () => {
+  it("registers the settings document, the status RPC and both hooks on shared settings, with one cleanup", async () => {
     spyOnOutput();
     const custom = join(xdg, "custom.env");
     await writeFile(custom, "A=1", { mode: 0o600 });
@@ -1030,11 +1030,23 @@ describe("registration", () => {
     const registerSettings = vi.fn<() => { read: typeof read; subscribe: () => typeof noop }>(
       () => ({ read, subscribe: () => noop }),
     );
-    const server = malformed<Parameters<typeof contribute>[0]>({ before, registerSettings });
+    const handle = vi.fn<(contract: { name: string }, handler: () => Promise<unknown>) => void>();
+    const server = malformed<Parameters<typeof contribute>[0]>({
+      before,
+      handle,
+      registerSettings,
+    });
 
     const cleanup = contribute(server);
 
     expect(registerSettings).toHaveBeenCalledWith(envelopeSettings);
+    expect(handle).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "env-file.status" }),
+      expect.any(Function),
+    );
+    const handler = handle.mock.calls[0]?.[1];
+    assert.isDefined(handler, "no status handler registered");
+    expect(await handler()).toEqual({ state: "ok", path: custom, source: "setting" });
     expect(before.mock.calls.map(([event]) => event)).toEqual([
       "agent.create",
       "agent.session_open",
@@ -1047,7 +1059,7 @@ describe("registration", () => {
     );
     expect(created.config.systemPrompt).toMatch(/^## Environment secrets\n/u);
     const result = await sessionOpen({ request: makeRequest() }, makeContext().context);
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledTimes(3);
     expect(result.env).toEqual({ A: "1" });
 
     expect(removeCreate).not.toHaveBeenCalled();

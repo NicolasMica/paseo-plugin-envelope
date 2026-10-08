@@ -26,39 +26,3 @@ export async function readEnvFile(path: string): Promise<EnvFile> {
     await handle.close().catch(() => {});
   }
 }
-
-/**
- * Settles with `promise`, or rejects on timeout or when `signal` aborts, clearing the timer either way. It stops waiting rather than cancel: a libuv thread blocked on a stalled mount can't be interrupted. The timeout error has name `TimeoutError` and code `ETIMEDOUT`, so both log shapes can name it.
- */
-export function withTimeout<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const settle = (finish: () => void) => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      finish();
-    };
-    const onAbort = () => {
-      const reason: unknown = signal?.reason;
-      settle(() => reject(reason));
-    };
-    const timer = setTimeout(
-      () =>
-        settle(() =>
-          reject(
-            Object.assign(new Error("timed out"), { name: "TimeoutError", code: "ETIMEDOUT" }),
-          ),
-        ),
-      ms,
-    );
-    // Observe `promise` first, so a rejection after an early abort is never left unhandled.
-    promise.then(
-      (value) => settle(() => resolve(value)),
-      (error: unknown) => settle(() => reject(error)),
-    );
-    if (signal?.aborted === true) {
-      onAbort();
-      return;
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}

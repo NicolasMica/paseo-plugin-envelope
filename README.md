@@ -6,7 +6,7 @@ Every agent of every provider receives the whole file. Agents can read, print or
 
 ## Before you install
 
-Paseo plugins are trusted code that runs unsandboxed in the daemon, with access to your files, processes, credentials and network. Read [`index.server.ts`](index.server.ts) and [`server/`](server/) before installing Envelope.
+Paseo plugins are trusted code that runs unsandboxed in the daemon, with access to your files, processes, credentials and network. Read [`index.server.ts`](index.server.ts) and [`server/`](server/) before installing Envelope, and [`index.client.tsx`](index.client.tsx) and [`client/`](client/) for its settings screen.
 
 Requirements:
 
@@ -69,17 +69,21 @@ export OPENAI_API_KEY=value
 
 ### Use another file
 
-To read another file, set `envFile` in the plugin settings. Create or edit `~/.paseo/plugin-settings/envelope/settings.json` (`<paseo home>/plugin-settings/<plugin id>/settings.json` if you changed the Paseo home or installed with `--id`):
+To read another file, open Settings → Plugins → Envelope → Environment in the app and type its path in the **Path** field, then **Save**. Leave the field empty and save to go back to the default path.
+
+- The path must be absolute or start with `~/`, where `~` is the home directory of the daemon's user. Any other value makes Envelope warn and inject nothing, rather than fall back to the default file. The screen refuses to save a value that is clearly not absolute.
+- Under the field, a status line shows the path the next session opening will read, whether it comes from the setting or is the default path, and whether the daemon can read a regular file there: found, not found, not a regular file, or the error code of the check (`EACCES` when the daemon's user can't read it, or `ETIMEDOUT` after 5 seconds on a stalled mount). It also says when the setting isn't an absolute path, the path can't be resolved (for example without a home directory for `~`), or the settings are invalid. **Refresh** checks again, for example after you create the file. The check runs on the daemon and only looks at the file's type and read permission: it never opens the file, and never reads or sends its content.
+- Unlike the default file, a configured file that doesn't exist gets a warning in the logs.
+- The setting is read again at every session opening, so a change applies at the next one, without reloading the plugin.
+- If two clients edit the path at the same time, the second save is refused: **Reload** discards your change and shows the saved path.
+
+The setting is stored in `~/.paseo/plugin-settings/envelope/settings.json` (`<paseo home>/plugin-settings/<plugin id>/settings.json` if you changed the Paseo home or installed with `--id`). You can also edit that file by hand, or ask an agent to:
 
 ```json
 { "version": 1, "values": { "envFile": "~/secrets/agents.env" } }
 ```
 
-- The path must be absolute or start with `~/`, where `~` is the home directory of the daemon's user. Any other value makes Envelope warn and inject nothing, rather than fall back to the default file.
-- An empty or missing `envFile` uses the default path.
-- Unlike the default file, a configured file that doesn't exist gets a warning in the logs.
-- The setting is read again at every session opening, so a change applies at the next one, without reloading the plugin. There is no settings screen in the app yet.
-- If the settings file isn't valid JSON or doesn't match this shape, Envelope warns and injects nothing.
+If the settings file isn't valid JSON or doesn't match this shape, Envelope warns and injects nothing, and the screen offers to reset it, which clears the saved path.
 
 ## When variables apply
 
@@ -171,7 +175,7 @@ The other lines are warnings. They carry no agent id, so match them to a session
 No line at all for a session means one of these:
 
 - Envelope isn't running: check that `paseo plugin ls` shows `envelope` as `running`, and that plugins are enabled.
-- The default file is missing, or isn't where the daemon looks (see [Write the `.env`](#write-the-env)).
+- The default file is missing, or isn't where the daemon looks (see [Write the `.env`](#write-the-env)). The status line in Settings → Plugins → Envelope → Environment shows the path the daemon reads and whether the file is there.
 - The file has no valid assignment.
 
 A variable missing from an agent can also come from a typo in the `.env`: dotenv skips malformed lines silently.
