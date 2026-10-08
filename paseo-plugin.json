@@ -1,5 +1,5 @@
 {
-  "id": "paseo-env",
+  "id": "envelope",
   "name": "Envelope",
   "description": "Hands your .env variables to every agent when its session opens",
   "requirements": {
