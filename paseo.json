@@ -8,6 +8,9 @@
     },
     "lint": {
       "command": "npm run lint"
+    },
+    "test": {
+      "command": "npm test"
     }
   }
 }

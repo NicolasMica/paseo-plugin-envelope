@@ -30,10 +30,13 @@ From the plugin docs, and from the spike in #3 (live daemon 0.11.1 and its bundl
 - Values are stored in plain text in a file. Keychain and 1Password come later.
 - The CLI is out of the ideal version as long as Paseo doesn't allow extending its CLI.
 - Explicit env keeps the last word over the `.env`: a `.env` key is injected only if it is absent from `request.env` and from the env of the agent's provider, including the providers it `extends`, read with `paseo.config.get()`. Paseo applies `request.env` after the provider env, so relying on `request.env` alone would let the global `.env` overwrite a provider's explicit env (#3). Codex suggested letting the `.env` win; we keep this order so that a global `.env` never overwrites the explicit env of a create request or of a provider. Two limits: the `.env` does override the daemon's inherited environment, except for the protected keys (`PATH`, `HOME`, `SHELL`, `USER`, `PASEO_*`), and a key passed with `paseo run --env` only wins at create, because Paseo drops it at the next session opening and the `.env` value then applies.
+- The `.env` is read with `dotenv`'s `parse` (pinned to an exact version, default parser), wrapped by `parseEnvFile` in `server/env-file.ts`. We don't write our own parser, to avoid maintaining one. Unlike `util.parseEnv`, dotenv bundles its own pure-JS parser, so the same file gives the same result whatever Node version runs the plugin. It does no `$VAR` interpolation (that is `dotenv-expand`, which we don't use) and no command substitution, and `parse` never throws on content and never logs. We accept its rules as they are and pin them with tests: `#` starts a comment even without a space before it, double quotes expand `\n` and `\r`, quoted values can span lines, keys may contain `.` and `-`, and malformed lines are skipped silently. dotenv gives no line numbers, so the plugin reports no per-line warning: rebuilding one would mean scanning lines ourselves, which is the parser we chose not to write.
+- The plugin is installed from Git, so `paseo-plugin.json` declares `build: npm ci --omit=dev --ignore-scripts` to install `dotenv` from the committed lockfile. `--ignore-scripts` skips the root `prepare` script (`lefthook install`), which would fail without dev dependencies.
 
 ## Rejected approaches
 
 - **Full platform from the start** (UI, MCP and inspector): too much surface before the core is validated. It becomes the roadmap (P2).
+- **Our own `.env` parser**: full control over the rules, but code to maintain for a need `dotenv` already covers.
 - **Delegating to direnv** (`direnv export json`): forces direnv and `direnv allow` on every colleague, and runs shell code on every session opening.
 
 ## Risks

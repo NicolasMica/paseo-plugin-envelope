@@ -23,7 +23,11 @@
     "format:check:files": "oxfmt --check",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "prepare": "lefthook install"
+    "prepare": "lefthook install",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "18.0.6"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.11.1",
@@ -36,6 +40,7 @@
     "react": "19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.9.3",
+    "vitest": "^5.0.3",
     "zod": "^4.4.3"
   }
 }
