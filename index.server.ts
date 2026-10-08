@@ -1,5 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
-export default function contribute(_server: PluginServerContext) {
-  return () => {};
+import { createSessionOpenHook } from "./server/inject-env";
+
+export default function contribute(server: PluginServerContext) {
+  return server.before("agent.session_open", createSessionOpenHook());
 }
