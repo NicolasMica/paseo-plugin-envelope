@@ -63,9 +63,9 @@ function spyOnOutput() {
   ];
 }
 
-function makeHooks(options: InjectEnvOptions = {}) {
+function makeHooks(options: Partial<InjectEnvOptions> = {}) {
   return createEnvelopeHooks({
-    env: { XDG_CONFIG_HOME: xdg },
+    readSettings: async () => ({ status: "ready", revision: "r", values: { envFile: envPath() } }),
     log: (line) => {
       output.push(`log: ${line}`);
     },
@@ -101,7 +101,7 @@ function makeContext(providers: unknown = {}) {
 async function create(
   request = makeRequest(),
   providers: unknown = {},
-  options: InjectEnvOptions = {},
+  options: Partial<InjectEnvOptions> = {},
 ) {
   const { context, get } = makeContext(providers);
   const result = await makeHooks(options).agentCreate({ request }, context);
@@ -225,12 +225,33 @@ describe("appending the guideline", () => {
 });
 
 describe("not appending the guideline", () => {
-  it("does nothing when the file is missing", async () => {
-    const { request, result } = await create();
+  it.each([
+    ["an empty envFile", { envFile: "" }],
+    ["no envFile", {}],
+  ])(
+    "does nothing and reads nothing for %s, even with a file at the old default path",
+    async (_label, values) => {
+      await writeEnv("A=1");
+      await mkdir(join(xdg, ".config", "paseo-plugin-envelope"), { recursive: true });
+      await writeFile(join(xdg, ".config", "paseo-plugin-envelope", ".env"), "A=1", {
+        mode: 0o600,
+      });
 
-    expect(result).toBe(request);
-    expect(output).toEqual([]);
-  });
+      const { request, result, get } = await create(
+        makeRequest(),
+        {},
+        {
+          readSettings: async () => ({ status: "ready", revision: "r", values }),
+          homedir: () => xdg,
+        },
+      );
+
+      expect(result).toBe(request);
+      expect(open).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(output).toEqual([]);
+    },
+  );
 
   it("does nothing when the file is empty", async () => {
     await writeEnv("");

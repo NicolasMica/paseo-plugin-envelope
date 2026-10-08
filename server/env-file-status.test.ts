@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,7 +30,6 @@ function ready(envFile?: string): () => Promise<EnvelopeSettingsState> {
 function makeHandler(options: Partial<EnvFileStatusOptions> = {}) {
   return createEnvFileStatusHandler({
     readSettings: ready(),
-    env: { XDG_CONFIG_HOME: dir },
     homedir: () => dir,
     ...options,
   });
@@ -42,8 +41,6 @@ async function status(options: Partial<EnvFileStatusOptions> = {}) {
   expect(envFileStatusSchema.safeParse(result).success).toBe(true);
   return result;
 }
-
-const defaultPath = () => join(dir, "paseo-plugin-envelope", ".env");
 
 describe("env-file.status", () => {
   it("is an RPC with an empty input", () => {
@@ -57,7 +54,7 @@ describe("env-file.status", () => {
 
     const result = await status({ readSettings: ready(path) });
 
-    expect(result).toEqual({ state: "ok", path, source: "setting" });
+    expect(result).toEqual({ state: "ok", path });
     expect(JSON.stringify(result)).not.toContain("value");
   });
 
@@ -67,7 +64,6 @@ describe("env-file.status", () => {
     expect(await status({ readSettings: ready("~/agents.env") })).toEqual({
       state: "ok",
       path: join(dir, "agents.env"),
-      source: "setting",
     });
   });
 
@@ -80,31 +76,26 @@ describe("env-file.status", () => {
     expect(await status({ readSettings: ready(link) })).toEqual({
       state: "ok",
       path: link,
-      source: "setting",
     });
   });
 
-  it("uses the default path when the setting is empty or absent", async () => {
-    await mkdir(join(dir, "paseo-plugin-envelope"));
-    await writeFile(defaultPath(), "");
+  it("reports not-configured without resolving a path when the setting is empty or absent", async () => {
+    const home = vi.fn<() => string>(() => dir);
 
-    expect(await status({ readSettings: ready("") })).toEqual({
-      state: "ok",
-      path: defaultPath(),
-      source: "default",
+    expect(await status({ readSettings: ready(""), homedir: home })).toEqual({
+      state: "not-configured",
     });
-    expect(await status()).toEqual({ state: "ok", path: defaultPath(), source: "default" });
+    expect(await status({ homedir: home })).toEqual({ state: "not-configured" });
+    expect(home).not.toHaveBeenCalled();
   });
 
-  it("reports a missing file, configured or default", async () => {
+  it("reports a missing file", async () => {
     const path = join(dir, "missing.env");
 
     expect(await status({ readSettings: ready(path) })).toEqual({
       state: "missing",
       path,
-      source: "setting",
     });
-    expect(await status()).toEqual({ state: "missing", path: defaultPath(), source: "default" });
   });
 
   it("reports a path under a regular file as missing", async () => {
@@ -115,7 +106,6 @@ describe("env-file.status", () => {
     expect(await status({ readSettings: ready(path) })).toEqual({
       state: "missing",
       path,
-      source: "setting",
     });
   });
 
@@ -126,12 +116,10 @@ describe("env-file.status", () => {
     expect(await status({ readSettings: ready(dir) })).toEqual({
       state: "not-file",
       path: dir,
-      source: "setting",
     });
     expect(await status({ readSettings: ready(fifo) })).toEqual({
       state: "not-file",
       path: fifo,
-      source: "setting",
     });
   });
 
@@ -144,7 +132,6 @@ describe("env-file.status", () => {
     expect(await status({ readSettings: ready(path), stat })).toEqual({
       state: "error",
       path,
-      source: "setting",
       code: "EACCES",
     });
     expect(stat).toHaveBeenCalledWith(path);
@@ -156,8 +143,8 @@ describe("env-file.status", () => {
     await chmod(path, 0o000);
     // Root reads a mode 000 file, so the expectation follows what `access` really says; the injected test below pins EACCES on any user.
     const expected = await access(path, constants.R_OK).then(
-      () => ({ state: "ok", path, source: "setting" }),
-      (error: unknown) => ({ state: "error", path, source: "setting", code: errorCode(error) }),
+      () => ({ state: "ok", path }),
+      (error: unknown) => ({ state: "error", path, code: errorCode(error) }),
     );
 
     expect(await status({ readSettings: ready(path) })).toEqual(expected);
@@ -173,7 +160,6 @@ describe("env-file.status", () => {
     expect(await status({ readSettings: ready(path), access: denied })).toEqual({
       state: "error",
       path,
-      source: "setting",
       code: "EACCES",
     });
     expect(denied).toHaveBeenCalledWith(path, constants.R_OK);
@@ -193,9 +179,7 @@ describe("env-file.status", () => {
     expect(
       await status({ readSettings: ready("~/agents.env"), homedir: noHome("ENOENT") }),
     ).toEqual({ state: "unresolved", code: "ENOENT" });
-    expect(
-      await status({ readSettings: ready(), env: {}, homedir: noHome("SECRET=value") }),
-    ).toEqual({
+    expect(await status({ readSettings: ready("~"), homedir: noHome("SECRET=value") })).toEqual({
       state: "unresolved",
       code: "UNKNOWN",
     });
@@ -211,7 +195,6 @@ describe("env-file.status", () => {
       expect(await status({ readSettings: ready(path), stat: fail(code) })).toEqual({
         state: "error",
         path,
-        source: "setting",
         code: "UNKNOWN",
       });
     }
@@ -238,7 +221,7 @@ describe("env-file.status", () => {
     const second = handler();
     await vi.advanceTimersByTimeAsync(50);
 
-    const timedOut = { state: "error", path, source: "setting", code: "ETIMEDOUT" };
+    const timedOut = { state: "error", path, code: "ETIMEDOUT" };
     expect(await first).toEqual(timedOut);
     expect(await second).toEqual(timedOut);
     expect(stat).toHaveBeenCalledOnce();
@@ -249,7 +232,7 @@ describe("env-file.status", () => {
     const third = handler();
     await vi.advanceTimersByTimeAsync(0);
     finish({ isFile: () => true });
-    expect(await third).toEqual({ state: "ok", path, source: "setting" });
+    expect(await third).toEqual({ state: "ok", path });
     expect(stat).toHaveBeenCalledTimes(2);
   });
 
@@ -286,12 +269,12 @@ describe("env-file.status", () => {
     expect(await status({ readSettings: throws })).toEqual({ state: "settings-unreadable" });
   });
 
-  it("defaults to the real filesystem, home and environment", async () => {
+  it("defaults to the real filesystem and home", async () => {
     const path = join(dir, "agents.env");
     await writeFile(path, "");
 
     const handler = createEnvFileStatusHandler({ readSettings: ready(path) });
 
-    expect(await handler()).toEqual({ state: "ok", path, source: "setting" });
+    expect(await handler()).toEqual({ state: "ok", path });
   });
 });

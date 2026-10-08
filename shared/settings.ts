@@ -7,7 +7,7 @@ export const envelopeSettings = defineSettings({
   scope: "host",
   version: 1,
   schema: z.object({
-    /** Path of the `.env` to read: absolute, or starting with `~/`. Unset or empty uses the XDG default. */
+    /** Path of the `.env` to read: absolute, or starting with `~/`. Unset or empty injects nothing. */
     envFile: z.string().optional(),
   }),
 });

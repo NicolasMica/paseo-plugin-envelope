@@ -13,10 +13,6 @@ interface StatusView {
 
 const NOTHING_INJECTED = "Nothing is injected at the next session open.";
 
-function fileHint({ path, source }: { path: string; source: "setting" | "default" }): string {
-  return `${path} (${source === "setting" ? "from the setting" : "default path"})`;
-}
-
 const SETTINGS_PROBLEMS = {
   relative: "Path not absolute",
   "invalid-settings": "Settings invalid",
@@ -24,22 +20,28 @@ const SETTINGS_PROBLEMS = {
 } as const;
 
 function describe(status: EnvFileStatus): StatusView {
-  if (status.state === "ok") return { label: "File found", hint: fileHint(status) };
+  if (status.state === "ok") return { label: "File found", hint: status.path };
   if (status.state === "missing") {
-    return { label: "File not found", hint: fileHint(status), error: NOTHING_INJECTED };
+    return { label: "File not found", hint: status.path, error: NOTHING_INJECTED };
   }
   if (status.state === "not-file") {
     return {
       label: "Not a regular file",
-      hint: fileHint(status),
+      hint: status.path,
       error: `${NOTHING_INJECTED} Directories, pipes and sockets are refused.`,
     };
   }
   if (status.state === "error") {
     return {
       label: `File check failed: ${status.code}`,
-      hint: fileHint(status),
+      hint: status.path,
       error: NOTHING_INJECTED,
+    };
+  }
+  if (status.state === "not-configured") {
+    return {
+      label: "Not configured",
+      hint: "Set a path to inject its variables into new sessions.",
     };
   }
   if (status.state === "unresolved") {

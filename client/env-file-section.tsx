@@ -21,7 +21,7 @@ interface Draft {
 }
 
 const HINT =
-  "Absolute, or starting with ~/ for the daemon user's home. Leave empty to use the default path. Changes apply to agents at their next session open.";
+  "Absolute, or starting with ~/ for the daemon user's home. Leave empty to inject nothing. Changes apply to agents at their next session open.";
 
 /** The `envFile` path editor and the status of the file in effect. */
 export function EnvFileSection({ settings }: SettingsSectionProps) {
