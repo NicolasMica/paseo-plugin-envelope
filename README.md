@@ -103,9 +103,33 @@ A `.env` variable is injected only when nothing more explicit sets it:
 - **Protected variables are never injected:** `PATH`, `HOME`, `SHELL`, `USER` and every key starting with `PASEO_`. Envelope skips them and counts them in its logs.
 - **If Envelope can't read the daemon config** within 5 seconds, it injects nothing for that session rather than risk overwriting a provider's env.
 
+## Secrets guideline
+
+When an agent is created, Envelope adds this guideline to its system prompt:
+
+> ## Environment secrets
+>
+> Your environment holds secrets that Paseo's Envelope plugin injected. Use them by reference ("$NAME") in the commands that need them. Never print a value: no `echo`, `env`, `printenv` or `set`, no `cat`, `grep` or `head` on a `.env` file, and no verbose or debug flag that prints auth headers. To check that a variable is set, run `[ -n "$NAME" ] && echo set`. If an expected variable is missing, tell the user instead of looking for the value elsewhere.
+
+- **Only when it injects something.** The guideline is added only when Envelope would inject at least one variable into the new agent, with the same rules as [Precedence](#precedence). It names no variable.
+- **Only for new agents.** Only agents created after Envelope is installed and enabled get it. Paseo only lets a plugin change the system prompt at creation: a session opening can only change the environment, so an existing agent never gets the guideline, even after a resume or refresh.
+- **Kept on resume.** Paseo stores the prompt with the agent and applies it again on resume and refresh.
+- **Appended, not replaced.** It comes after the agent's own system prompt, and before the text of Settings → Orchestration → Append system prompt, which Paseo adds afterwards.
+
+How each provider applies it:
+
+| Provider                                 | Where the guideline goes                                   |
+| ---------------------------------------- | ---------------------------------------------------------- |
+| Claude Code                              | Appended to Claude Code's system prompt                    |
+| Codex                                    | Developer instructions, sent at thread start and each turn |
+| OpenCode, Pi, OMP                        | Appended to the system prompt                              |
+| ACP providers (Copilot, Cursor, Gemini…) | Ignored                                                    |
+
+This is guidance, not a guarantee: an agent can still print or send a value. Only put in the `.env` what every agent may see.
+
 ## Security
 
-- **Every agent sees every variable.** There is no per-project, per-provider or per-agent scope. An agent can print a value in its transcript, in command output, or pass it to a tool. Providers keep transcripts on disk, so a printed value stays there after the session ends.
+- **Every agent sees every variable.** There is no per-project, per-provider or per-agent scope. An agent can print a value in its transcript, in command output, or pass it to a tool. Providers keep transcripts on disk, so a printed value stays there after the session ends. The [secrets guideline](#secrets-guideline) asks new agents not to print values, but it can't enforce it, and agents created before Envelope, or on ACP providers, don't get it.
 - **Values stay in plain text** in the `.env`. Keep it at `chmod 600` in a `chmod 700` directory. On macOS and Linux, Envelope logs a warning when the file is readable by group or others, once until the file or its mode changes.
 - **Envelope logs counts, not names.** Its output contains agent ids, session reasons, counts, the file path, error codes and error names, never a variable name or a value. A malformed line can turn part of a value into a key, so even names could leak a value.
 - **Don't run the daemon at the `trace` log level while agents handle secrets.** At `trace`, Paseo logs raw provider events, including tool output, so a value an agent prints lands in `daemon.log`. The default `info` level doesn't log the injected environment.
