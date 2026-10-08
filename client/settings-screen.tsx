@@ -20,7 +20,15 @@ const SECTIONS: readonly { id: string; Component: ComponentType<SettingsSectionP
 /** Envelope's screen under Settings → Plugins → Envelope. */
 export function SettingsScreen(props: PluginSurfaceProps) {
   const settings = useSettings(envelopeSettings);
-  if (settings.status === "loading") return <SettingsRow label="Loading settings…" />;
+  if (settings.status === "loading") {
+    return (
+      <SettingsSection title="Settings">
+        <SettingsCard>
+          <SettingsRow label="Loading settings…" />
+        </SettingsCard>
+      </SettingsSection>
+    );
+  }
   if (settings.status === "error") {
     return (
       <SettingsSection title="Settings">

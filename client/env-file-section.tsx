@@ -28,6 +28,8 @@ export function EnvFileSection({ settings }: SettingsSectionProps) {
   const [draft, setDraft] = useState<Draft | null>(null);
   // Bumped to remount the input with the saved path after a save or a discard.
   const [generation, setGeneration] = useState(0);
+  // `saveError` is shared by every section, so it is shown only after this section's own save failed.
+  const [saveFailed, setSaveFailed] = useState(false);
   const saved = settings.values.envFile ?? "";
   const { values, revision } = settings;
 
@@ -41,12 +43,16 @@ export function EnvFileSection({ settings }: SettingsSectionProps) {
 
   const closeDraft = () => {
     setDraft(null);
+    setSaveFailed(false);
     setGeneration((value) => value + 1);
   };
 
   async function save(current: Draft) {
+    setSaveFailed(false);
     if (await settings.save(withEnvFile(current.values, current.text), current.revision)) {
       closeDraft();
+    } else {
+      setSaveFailed(true);
     }
   }
 
@@ -56,7 +62,7 @@ export function EnvFileSection({ settings }: SettingsSectionProps) {
   }
 
   const formatError = draft === null ? null : envFilePathError(draft.text);
-  const saveError = draft === null ? null : settings.saveError;
+  const saveError = draft !== null && saveFailed ? settings.saveError : null;
   const changed = draft !== null && draft.text.trim() !== saved;
 
   return (
@@ -82,11 +88,11 @@ export function EnvFileSection({ settings }: SettingsSectionProps) {
         )}
         {draft === null ? null : (
           <SettingsAction
-            label={saveError === null ? "Discard your change" : "Reload the saved settings"}
-            {...(saveError === null
-              ? {}
-              : { hint: "Discards your change, for example after another client saved first." })}
-            actionLabel={saveError === null ? "Discard" : "Reload"}
+            label={saveFailed ? "Reload the saved settings" : "Discard your change"}
+            {...(saveFailed
+              ? { hint: "Discards your change, for example after another client saved first." }
+              : {})}
+            actionLabel={saveFailed ? "Reload" : "Discard"}
             disabled={settings.saving}
             onPress={discard}
           />

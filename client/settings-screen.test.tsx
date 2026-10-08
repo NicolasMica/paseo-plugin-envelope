@@ -10,12 +10,16 @@ import { envFilePathError } from "./env-file-path";
 import type { EnvelopeSettings, EnvelopeValues, ReadySettings } from "./section";
 import { SettingsScreen } from "./settings-screen";
 
+interface Parser {
+  parse(value: unknown): unknown;
+}
+
 /** The host-provided state this test drives: the settings document and the status RPC. */
 const host = vi.hoisted(() => {
   const state: {
     settings: unknown;
     listeners: Set<() => void>;
-    rpc: (input: object) => Promise<unknown>;
+    rpc: (input: unknown) => Promise<unknown>;
     rpcContract: unknown;
     settingsDefinition: unknown;
   } = {
@@ -52,9 +56,11 @@ vi.mock("@getpaseo/plugin/client", () => ({
       () => host.settings,
     );
   },
-  useRpc: (contract: unknown) => {
+  // Validates both ways like the real `useRpc`, so every fixture is checked against the contract.
+  useRpc: (contract: { input: Parser; output: Parser }) => {
     host.rpcContract = contract;
-    return host.rpc;
+    return async (input: unknown) =>
+      contract.output.parse(await host.rpc(contract.input.parse(input)));
   },
 }));
 
@@ -65,7 +71,7 @@ type Actions = Pick<EnvelopeSettings, "save" | "reset" | "reload">;
 const save = vi.fn<Actions["save"]>();
 const reset = vi.fn<Actions["reset"]>();
 const reload = vi.fn<Actions["reload"]>();
-const rpc = vi.fn<(input: object) => Promise<EnvFileStatus>>();
+const rpc = vi.fn<(input: unknown) => Promise<EnvFileStatus>>();
 
 function setSettings(state: EnvelopeSettings) {
   host.settings = state;
@@ -114,7 +120,8 @@ beforeEach(() => {
   rpc.mockReset();
   reload.mockResolvedValue();
   host.rpc = rpc;
-  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The row sets its own `retry`; no delay keeps a retried failure fast.
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
   root = createRoot();
 });
 
@@ -337,6 +344,59 @@ describe("path editor", () => {
     expect(input().props["initialValue"]).toBe("~/other.env");
   });
 
+  it("disables the controls while its save is in flight", async () => {
+    let finish: (saved: boolean) => void = () => {};
+    save.mockImplementation(async (values) => {
+      setSettings(ready({ envFile: "~/old.env" }, "r1", { saving: true }));
+      const saved = await new Promise<boolean>((resolve) => {
+        finish = resolve;
+      });
+      setSettings(ready(values, "r2"));
+      return saved;
+    });
+    await render(ready({ envFile: "~/old.env" }));
+    await type("~/new.env");
+
+    await press("Save");
+
+    expect(input().props["disabled"]).toBe(true);
+    expect(find("SettingsAction", "Save").props["disabled"]).toBe(true);
+    expect(find("SettingsAction", "Discard").props["disabled"]).toBe(true);
+    await act(async () => finish(true));
+    await settle();
+    expect(has("SettingsAction", "Save")).toBe(false);
+    expect(input().props).toMatchObject({ disabled: false, initialValue: "~/new.env" });
+  });
+
+  it("ignores a save error from another section's save", async () => {
+    await render(ready({ envFile: "~/old.env" }));
+    await type("~/new.env");
+
+    await act(async () =>
+      setSettings(ready({ envFile: "~/old.env" }, "r1", { saveError: "revision conflict" })),
+    );
+
+    expect(input().props["error"]).toBeNull();
+    expect(has("SettingsAction", "Discard")).toBe(true);
+    expect(has("SettingsAction", "Reload")).toBe(false);
+  });
+
+  it("drops its save error once a retried save succeeds", async () => {
+    save.mockResolvedValueOnce(false);
+    await render(ready({ envFile: "~/old.env" }, "r1", { saveError: "write failed" }));
+    await type("~/new.env");
+    await press("Save");
+    expect(input().props["error"]).toBe("write failed");
+
+    save.mockImplementationOnce(async (values) => {
+      setSettings(ready(values, "r2"));
+      return true;
+    });
+    await press("Save");
+    expect(input().props["error"]).toBeNull();
+    expect(has("SettingsAction", "Reload")).toBe(false);
+  });
+
   it("discards a draft and reseeds the input", async () => {
     await render(ready({ envFile: "~/old.env" }));
     await type("~/new.env");
@@ -410,6 +470,7 @@ describe("status row", () => {
     [{ state: "relative" }, "Path not absolute"],
     [{ state: "invalid-settings" }, "Settings invalid"],
     [{ state: "settings-unreadable" }, "Settings unreadable"],
+    [{ state: "unresolved", code: "ENOENT" }, "Path can't be resolved: ENOENT"],
   ] satisfies [EnvFileStatus, string][])("shows %o as %s", async (status, label) => {
     const props = await statusFor(status);
 
@@ -417,12 +478,26 @@ describe("status row", () => {
     expect(props["error"]).toContain("Nothing is injected");
   });
 
-  it("shows a failed RPC with a refresh", async () => {
+  it("retries a failed RPC once, then shows the failure with a refresh", async () => {
     rpc.mockRejectedValue(new Error("offline"));
     await render(ready({}));
+    await settle();
 
+    expect(rpc).toHaveBeenCalledTimes(2);
     expect(statusRow().props["label"]).toBe("File check failed");
     expect(statusRow().props["error"]).toContain("couldn't");
+  });
+
+  it("strips unknown status keys and refuses a status that breaks the contract", async () => {
+    host.rpc = async () => ({ state: "ok", path: "/a.env", source: "setting", content: 1 });
+    await render(ready({}));
+    await settle();
+    expect(statusRow().props["label"]).toBe("File found");
+
+    host.rpc = async () => ({ state: "error", path: "/a.env", source: "setting", code: "x=1" });
+    await call(statusRow(), "onPress");
+    await settle();
+    expect(statusRow().props["label"]).toBe("File check failed");
   });
 
   it("checks again on refresh, and after a save", async () => {

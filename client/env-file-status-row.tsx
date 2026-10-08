@@ -42,6 +42,9 @@ function describe(status: EnvFileStatus): StatusView {
       error: NOTHING_INJECTED,
     };
   }
+  if (status.state === "unresolved") {
+    return { label: `Path can't be resolved: ${status.code}`, error: NOTHING_INJECTED };
+  }
   return { label: SETTINGS_PROBLEMS[status.state], error: NOTHING_INJECTED };
 }
 
@@ -51,6 +54,8 @@ export function EnvFileStatusRow({ revision }: { revision: string }) {
   const query = useQuery({
     queryKey: ["env-file-status", revision],
     queryFn: () => getStatus({}),
+    // File problems come back as a status, never a rejection, so a retry only covers transport, and one is enough before showing the failure.
+    retry: 1,
   });
   let view: StatusView;
   if (query.isPending) {

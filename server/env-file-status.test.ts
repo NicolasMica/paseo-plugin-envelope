@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { envFileStatus, envFileStatusSchema } from "../shared/env-file-status";
 import { createEnvFileStatusHandler, type EnvFileStatusOptions } from "./env-file-status";
+import { errorCode } from "./errors";
 import type { EnvelopeSettingsState } from "./inject-env";
 
 let dir: string;
@@ -148,6 +150,57 @@ describe("env-file.status", () => {
     expect(stat).toHaveBeenCalledWith(path);
   });
 
+  it("reports a regular file the daemon can't read, as the hook's open would fail", async () => {
+    const path = join(dir, "locked.env");
+    await writeFile(path, "SECRET=value");
+    await chmod(path, 0o000);
+    // Root reads a mode 000 file, so the expectation follows what `access` really says; the injected test below pins EACCES on any user.
+    const expected = await access(path, constants.R_OK).then(
+      () => ({ state: "ok", path, source: "setting" }),
+      (error: unknown) => ({ state: "error", path, source: "setting", code: errorCode(error) }),
+    );
+
+    expect(await status({ readSettings: ready(path) })).toEqual(expected);
+  });
+
+  it("checks read permission of a regular file only", async () => {
+    const path = join(dir, "agents.env");
+    await writeFile(path, "");
+    const denied = vi.fn<(path: string, mode: number) => Promise<void>>(async () => {
+      throw Object.assign(new Error("denied"), { code: "EACCES" });
+    });
+
+    expect(await status({ readSettings: ready(path), access: denied })).toEqual({
+      state: "error",
+      path,
+      source: "setting",
+      code: "EACCES",
+    });
+    expect(denied).toHaveBeenCalledWith(path, constants.R_OK);
+
+    denied.mockClear();
+    expect(await status({ readSettings: ready(dir), access: denied })).toMatchObject({
+      state: "not-file",
+    });
+    expect(denied).not.toHaveBeenCalled();
+  });
+
+  it("reports a path that can't be resolved, with an identifier-shaped code", async () => {
+    const noHome = (code: unknown) => () => {
+      throw Object.assign(new Error("SECRET=value"), { code });
+    };
+
+    expect(
+      await status({ readSettings: ready("~/agents.env"), homedir: noHome("ENOENT") }),
+    ).toEqual({ state: "unresolved", code: "ENOENT" });
+    expect(
+      await status({ readSettings: ready(), env: {}, homedir: noHome("SECRET=value") }),
+    ).toEqual({
+      state: "unresolved",
+      code: "UNKNOWN",
+    });
+  });
+
   it("reports a code without an identifier shape as UNKNOWN", async () => {
     const path = join(dir, "agents.env");
     const fail = (code: unknown) => async () => {
@@ -174,7 +227,12 @@ describe("env-file.status", () => {
           finish = resolve;
         }),
     );
-    const handler = makeHandler({ readSettings: ready(path), stat, timeoutMs: 50 });
+    const handler = makeHandler({
+      readSettings: ready(path),
+      stat,
+      access: async () => {},
+      timeoutMs: 50,
+    });
 
     const first = handler();
     const second = handler();

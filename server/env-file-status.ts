@@ -1,4 +1,5 @@
-import { stat as statPath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access as accessPath, stat as statPath } from "node:fs/promises";
 import { homedir } from "node:os";
 
 import type { EnvFileStatus } from "../shared/env-file-status";
@@ -8,15 +9,19 @@ import { resolveEnvFile, type EnvelopeSettingsState } from "./inject-env";
 export interface EnvFileStatusOptions {
   /** The same saved settings the session-open hook reads. */
   readSettings: () => Promise<EnvelopeSettingsState>;
-  /** Bounds the `stat`: a file on a stalled mount can block it with no limit. */
+  /** Bounds the `stat` and `access`: a file on a stalled mount can block them with no limit. */
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   homedir?: () => string;
   stat?: (path: string) => Promise<{ isFile(): boolean }>;
+  /** Checks that the daemon can open a regular file for reading, as the hook does. */
+  access?: (path: string, mode: number) => Promise<void>;
 }
 
+type FileCheck = "ok" | "not-file";
+
 /**
- * Builds the `env-file.status` handler: the path the next session open reads and what is there. It follows symlinks like the hook's `open`, but never opens the file, and it never throws.
+ * Builds the `env-file.status` handler: the path the next session open reads and what is there. It follows symlinks like the hook's `open` and checks read permission, but never opens the file, and it never throws.
  */
 export function createEnvFileStatusHandler(options: EnvFileStatusOptions) {
   const {
@@ -25,19 +30,25 @@ export function createEnvFileStatusHandler(options: EnvFileStatusOptions) {
     env = process.env,
     homedir: home = homedir,
     stat = statPath,
+    access = accessPath,
   } = options;
-  // A `stat` stuck on a stalled mount holds a libuv thread until it settles, so repeated refreshes share it instead of starving the threadpool the hook reads with.
-  const pendingStats = new Map<string, Promise<{ isFile(): boolean }>>();
+  // A check stuck on a stalled mount holds a libuv thread until it settles, so repeated refreshes share it instead of starving the threadpool the hook reads with.
+  const pendingChecks = new Map<string, Promise<FileCheck>>();
 
-  function statShared(path: string) {
-    let pending = pendingStats.get(path);
+  /** `stat`, then `access` for a regular file, which rejects with `EACCES` when the hook couldn't open it (mode 000, another owner). */
+  async function checkFile(path: string): Promise<FileCheck> {
+    if (!(await stat(path)).isFile()) return "not-file";
+    await access(path, constants.R_OK);
+    return "ok";
+  }
+
+  function checkShared(path: string) {
+    let pending = pendingChecks.get(path);
     if (pending === undefined) {
-      pending = Promise.resolve()
-        .then(() => stat(path))
-        .finally(() => {
-          pendingStats.delete(path);
-        });
-      pendingStats.set(path, pending);
+      pending = checkFile(path).finally(() => {
+        pendingChecks.delete(path);
+      });
+      pendingChecks.set(path, pending);
     }
     return pending;
   }
@@ -52,14 +63,19 @@ export function createEnvFileStatusHandler(options: EnvFileStatusOptions) {
     // The invalid state's `error` can quote stored values, so it is not returned.
     if (settings.status === "invalid") return { state: "invalid-settings" };
 
-    const target = resolveEnvFile(settings.values.envFile, env, home);
+    let target: ReturnType<typeof resolveEnvFile>;
+    try {
+      // Resolving can call `homedir`, which throws when the daemon user has no home.
+      target = resolveEnvFile(settings.values.envFile, env, home);
+    } catch (error) {
+      return { state: "unresolved", code: errorCode(error) };
+    }
     if (target === null) return { state: "relative" };
     const { path } = target;
     const source = target.configured ? "setting" : "default";
 
     try {
-      const stats = await withTimeout(statShared(path), timeoutMs);
-      return { state: stats.isFile() ? "ok" : "not-file", path, source };
+      return { state: await withTimeout(checkShared(path), timeoutMs), path, source };
     } catch (error) {
       const code = errorCode(error);
       if (code === "ENOENT" || code === "ENOTDIR") return { state: "missing", path, source };
