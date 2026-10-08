@@ -4,9 +4,7 @@ import { z } from "zod";
 /** A filesystem error code as Node reports it (`ENOENT`, `EACCES`). Anything else is reported as `UNKNOWN`, so a crafted error can't carry a value. */
 export const ERROR_CODE = /^E[A-Z0-9]{1,31}$/u;
 
-/** Where the path in effect comes from: the `envFile` setting, or the default path when the setting is empty. */
-const source = z.enum(["setting", "default"]);
-const file = { path: z.string(), source };
+const file = { path: z.string() };
 const code = z.union([z.string().regex(ERROR_CODE), z.literal("UNKNOWN")]);
 
 /**
@@ -21,6 +19,8 @@ export const envFileStatusSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("not-file"), ...file }),
   /** Any other check failure, including a regular file the daemon can't read (`EACCES`) and a 5 s timeout. */
   z.object({ state: z.literal("error"), ...file, code }),
+  /** The `envFile` setting is unset or empty: nothing is injected. */
+  z.object({ state: z.literal("not-configured") }),
   /** The path couldn't be resolved, for example when the daemon user has no home directory: nothing is injected. */
   z.object({ state: z.literal("unresolved"), code }),
   /** The setting is not an absolute path: nothing is injected. */

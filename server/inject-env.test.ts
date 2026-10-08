@@ -13,7 +13,6 @@ import { envelopeSettings } from "../shared/settings";
 import {
   builtinProviders,
   createEnvelopeHooks,
-  envFilePath,
   providerEnvKeys,
   resolveEnvFile,
   type EnvelopeSettingsState,
@@ -76,9 +75,9 @@ async function writeEnv(content: string, mode = 0o600) {
   await chmod(envPath(), mode);
 }
 
-function makeHook(options: InjectEnvOptions = {}) {
+function makeHook(options: Partial<InjectEnvOptions> = {}) {
   return createEnvelopeHooks({
-    env: { XDG_CONFIG_HOME: xdg },
+    readSettings: ready(envPath()),
     log: (line) => {
       lines.push(line);
     },
@@ -152,76 +151,7 @@ async function run(content: string, providers: unknown = {}, request = makeReque
   return { result, get };
 }
 
-describe("path resolution", () => {
-  const home = () => "/home/me";
-
-  it("uses an absolute XDG_CONFIG_HOME", () => {
-    expect(envFilePath({ XDG_CONFIG_HOME: "/xdg" }, home)).toBe("/xdg/paseo-plugin-envelope/.env");
-  });
-
-  it("ignores a relative XDG_CONFIG_HOME", () => {
-    expect(envFilePath({ XDG_CONFIG_HOME: "rel/xdg" }, home)).toBe(
-      "/home/me/.config/paseo-plugin-envelope/.env",
-    );
-  });
-
-  it("ignores an empty XDG_CONFIG_HOME", () => {
-    expect(envFilePath({ XDG_CONFIG_HOME: "" }, home)).toBe(
-      "/home/me/.config/paseo-plugin-envelope/.env",
-    );
-  });
-
-  it("falls back to the home directory", () => {
-    expect(envFilePath({}, home)).toBe("/home/me/.config/paseo-plugin-envelope/.env");
-  });
-
-  it("resolves the path on every call", async () => {
-    const env: NodeJS.ProcessEnv = { XDG_CONFIG_HOME: join(xdg, "missing") };
-    const hook = makeHook({ env });
-    const { context } = makeContext();
-    await writeEnv("A=1");
-
-    const before = await hook({ request: makeRequest() }, context);
-    env["XDG_CONFIG_HOME"] = xdg;
-    const after = await hook({ request: makeRequest() }, context);
-
-    expect(before.env).toEqual({});
-    expect(after.env).toEqual({ A: "1" });
-  });
-
-  it("reads from the home fallback", async () => {
-    const hook = makeHook({ env: {}, homedir: () => xdg });
-    await mkdir(join(xdg, ".config", "paseo-plugin-envelope"), { recursive: true });
-    await writeFile(join(xdg, ".config", "paseo-plugin-envelope", ".env"), "A=1", { mode: 0o600 });
-
-    const result = await hook({ request: makeRequest() }, makeContext().context);
-
-    expect(result.env).toEqual({ A: "1" });
-  });
-});
-
 describe("reading the file", () => {
-  it("does nothing and logs nothing when the file is missing", async () => {
-    const request = makeRequest();
-    const { context, get } = makeContext();
-
-    const result = await makeHook()({ request }, context);
-
-    expect(result).toBe(request);
-    expect(get).not.toHaveBeenCalled();
-    expect([...lines, ...warnings]).toEqual([]);
-  });
-
-  it("treats ENOTDIR like a missing file", async () => {
-    await writeFile(join(xdg, "paseo-plugin-envelope"), "not a dir");
-    const request = makeRequest();
-
-    const result = await makeHook()({ request }, makeContext().context);
-
-    expect(result).toBe(request);
-    expect([...lines, ...warnings]).toEqual([]);
-  });
-
   it("re-reads the file on every call", async () => {
     const hook = makeHook();
     const { context } = makeContext();
@@ -553,8 +483,7 @@ describe("settings", () => {
     return { request, result, get };
   }
 
-  it("reads the configured absolute path instead of the default", async () => {
-    await writeEnv("DEFAULT=1");
+  it("reads the configured absolute path", async () => {
     await writeFile(custom(), "CUSTOM=1", { mode: 0o600 });
 
     const { result } = await runWith(ready(custom()));
@@ -578,7 +507,7 @@ describe("settings", () => {
   });
 
   it.each(["custom.env", "./custom.env", "~user/custom.env", "~custom.env"])(
-    "rejects the relative path %s without falling back to the default",
+    "rejects the relative path %s",
     async (envFile) => {
       await writeEnv("DEFAULT=1");
 
@@ -593,12 +522,19 @@ describe("settings", () => {
   it.each([
     ["an empty envFile", ""],
     ["no envFile", undefined],
-  ])("uses the default path for %s", async (_label, envFile) => {
-    await writeEnv("DEFAULT=1");
+  ])("reads nothing and logs nothing for %s", async (_label, envFile) => {
+    await writeEnv("A=1");
+    await mkdir(join(xdg, ".config", "paseo-plugin-envelope"), { recursive: true });
+    await writeFile(join(xdg, ".config", "paseo-plugin-envelope", ".env"), "OLD_DEFAULT=1", {
+      mode: 0o600,
+    });
 
-    const { result } = await runWith(ready(envFile));
+    const { result, request, get } = await runWith(ready(envFile), { homedir: () => xdg });
 
-    expect(result.env).toEqual({ DEFAULT: "1" });
+    expect(result).toBe(request);
+    expect(open).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect([...lines, ...warnings]).toEqual([]);
   });
 
   it("warns when the configured file is missing", async () => {
@@ -614,13 +550,6 @@ describe("settings", () => {
     await runWith(ready(join(custom(), ".env")));
 
     expect(warnings).toEqual(["read failed: ENOTDIR"]);
-  });
-
-  it("stays silent when the default file is missing", async () => {
-    const { result, request } = await runWith(ready());
-
-    expect(result).toBe(request);
-    expect([...lines, ...warnings]).toEqual([]);
   });
 
   it("names the configured path in the permission warning", async () => {
@@ -684,34 +613,29 @@ describe("settings", () => {
     await writeFile(custom(), "CUSTOM=1", { mode: 0o600 });
     const readSettings = vi
       .fn<() => Promise<EnvelopeSettingsState>>()
-      .mockImplementationOnce(ready())
-      .mockImplementationOnce(ready(custom()));
+      .mockImplementationOnce(ready(envPath()))
+      .mockImplementationOnce(ready(custom()))
+      .mockImplementationOnce(ready());
     const hook = makeHook({ readSettings });
     const { context } = makeContext();
 
     const first = await hook({ request: makeRequest() }, context);
     const second = await hook({ request: makeRequest() }, context);
+    const third = await hook({ request: makeRequest() }, context);
 
     expect(first.env).toEqual({ DEFAULT: "1" });
     expect(second.env).toEqual({ CUSTOM: "1" });
+    expect(third.env).toEqual({});
   });
 
   it("resolves paths without touching the filesystem", () => {
     const home = () => "/home/me";
 
-    expect(resolveEnvFile("/etc/a.env", {}, home)).toEqual({
-      path: "/etc/a.env",
-      configured: true,
-    });
-    expect(resolveEnvFile("~/a.env", {}, home)).toEqual({
-      path: "/home/me/a.env",
-      configured: true,
-    });
-    expect(resolveEnvFile(undefined, { XDG_CONFIG_HOME: "/xdg" }, home)).toEqual({
-      path: "/xdg/paseo-plugin-envelope/.env",
-      configured: false,
-    });
-    expect(resolveEnvFile("a.env", {}, home)).toBeNull();
+    expect(resolveEnvFile("/etc/a.env", home)).toBe("/etc/a.env");
+    expect(resolveEnvFile("~/a.env", home)).toBe("/home/me/a.env");
+    expect(resolveEnvFile(undefined, home)).toBeUndefined();
+    expect(resolveEnvFile("", home)).toBeUndefined();
+    expect(resolveEnvFile("a.env", home)).toBeNull();
   });
 });
 
@@ -1046,7 +970,7 @@ describe("registration", () => {
     );
     const handler = handle.mock.calls[0]?.[1];
     assert.isDefined(handler, "no status handler registered");
-    expect(await handler()).toEqual({ state: "ok", path: custom, source: "setting" });
+    expect(await handler()).toEqual({ state: "ok", path: custom });
     expect(before.mock.calls.map(([event]) => event)).toEqual([
       "agent.create",
       "agent.session_open",
@@ -1331,7 +1255,7 @@ describe("secrecy", () => {
     ];
     // Group-readable so the permission warning fires too.
     await writeEnv(content, 0o644);
-    const hook = createEnvelopeHooks({ env: { XDG_CONFIG_HOME: xdg } }).sessionOpen;
+    const hook = createEnvelopeHooks({ readSettings: ready(envPath()) }).sessionOpen;
     const okGet = async () => ({
       config: { providers: { claude: { env: { S3CR3T_PROV: "p" } } } },
     });
@@ -1369,10 +1293,9 @@ describe("secrecy", () => {
     const allSkipped = await hook({ request }, ok);
     await mkdir(join(xdg, "dir-case", "paseo-plugin-envelope", ".env"), { recursive: true });
     results.push(
-      await createEnvelopeHooks({ env: { XDG_CONFIG_HOME: join(xdg, "dir-case") } }).sessionOpen(
-        { request },
-        ok,
-      ),
+      await createEnvelopeHooks({
+        readSettings: ready(join(xdg, "dir-case", "paseo-plugin-envelope", ".env")),
+      }).sessionOpen({ request }, ok),
     );
     const settingsCases: (() => Promise<EnvelopeSettingsState>)[] = [
       async () => ({ status: "invalid", revision: "r", error: `bad ${sentinels.injected}` }),
@@ -1383,12 +1306,7 @@ describe("secrecy", () => {
       ready(join(xdg, `missing-${sentinels.injected}`)),
     ];
     for (const readSettings of settingsCases) {
-      results.push(
-        await createEnvelopeHooks({ env: { XDG_CONFIG_HOME: xdg }, readSettings }).sessionOpen(
-          { request },
-          ok,
-        ),
-      );
+      results.push(await createEnvelopeHooks({ readSettings }).sessionOpen({ request }, ok));
     }
     vi.mocked(open).mockRejectedValueOnce(
       Object.assign(new Error(sentinels.injected), { code: `E ${sentinels.injected}` }),

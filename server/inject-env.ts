@@ -19,14 +19,13 @@ const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
 export type EnvelopeSettingsState = PluginSettingsState<typeof envelopeSettings.schema>;
 
 export interface InjectEnvOptions {
-  /** Reads the plugin settings on every session open. Absent means no settings: the default path applies. */
-  readSettings?: () => Promise<EnvelopeSettingsState>;
+  /** Reads the plugin settings on every session open and agent creation. */
+  readSettings: () => Promise<EnvelopeSettingsState>;
   configTimeoutMs?: number;
   /** Bounds the whole `.env` read: a file on a stalled mount can block `open`, `stat` or `read` with no limit. */
   readTimeoutMs?: number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
-  env?: NodeJS.ProcessEnv;
   homedir?: () => string;
   platform?: NodeJS.Platform;
 }
@@ -46,25 +45,15 @@ function isProtected(key: string): boolean {
   return PROTECTED_KEYS.has(key) || key.startsWith("PASEO_");
 }
 
-/** `<XDG_CONFIG_HOME>/paseo-plugin-envelope/.env`, ignoring an empty or relative `XDG_CONFIG_HOME` as the XDG spec requires. */
-export function envFilePath(env: NodeJS.ProcessEnv, home: () => string): string {
-  const xdg = env["XDG_CONFIG_HOME"];
-  const base = xdg !== undefined && isAbsolute(xdg) ? xdg : join(home(), ".config");
-  return join(base, "paseo-plugin-envelope", ".env");
-}
-
-/** Where to read the `.env`: the `envFile` setting when set, with a leading `~` expanded, else the XDG default. Null when the setting is not an absolute path. */
+/** Where to read the `.env`: the `envFile` setting with a leading `~` expanded. Undefined when the setting is unset or empty, null when it is not an absolute path. */
 export function resolveEnvFile(
   envFile: string | undefined,
-  env: NodeJS.ProcessEnv,
   home: () => string,
-): { path: string; configured: boolean } | null {
-  if (envFile === undefined || envFile === "") {
-    return { path: envFilePath(env, home), configured: false };
-  }
+): string | null | undefined {
+  if (envFile === undefined || envFile === "") return undefined;
   const path =
     envFile === "~" || envFile.startsWith("~/") ? join(home(), envFile.slice(1)) : envFile;
-  return isAbsolute(path) ? { path, configured: true } : null;
+  return isAbsolute(path) ? path : null;
 }
 
 /**
@@ -116,16 +105,15 @@ interface Injection {
 type AgentCreateRequest = PluginBeforeRequests["agent.create"];
 
 /**
- * Builds the `agent.session_open` before-hook that injects the `.env` chosen by the settings, or the global default, and the `agent.create` before-hook that appends `SECRETS_GUIDELINE` to the system prompt when that injection would add at least one variable. Both share one read path, so a stalled read is shared too. They only ever log key counts, file paths, error codes and error names, never a key name or a value, and they never throw: on any failure they return the request unchanged.
+ * Builds the `agent.session_open` before-hook that injects the `.env` the `envFile` setting points to, nothing when it is unset, and the `agent.create` before-hook that appends `SECRETS_GUIDELINE` to the system prompt when that injection would add at least one variable. Both share one read path, so a stalled read is shared too. They only ever log key counts, file paths, error codes and error names, never a key name or a value, and they never throw: on any failure they return the request unchanged.
  */
-export function createEnvelopeHooks(options: InjectEnvOptions = {}) {
+export function createEnvelopeHooks(options: InjectEnvOptions) {
   const {
     readSettings,
     configTimeoutMs = 5000,
     readTimeoutMs = 5000,
     log = (line: string) => console.log(line),
     warn = (line: string) => console.warn(line),
-    env = process.env,
     homedir: home = homedir,
     platform = process.platform,
   } = options;
@@ -148,7 +136,6 @@ export function createEnvelopeHooks(options: InjectEnvOptions = {}) {
   async function readEnvFileSetting(
     report: (line: string) => void,
   ): Promise<{ envFile?: string | undefined } | null> {
-    if (readSettings === undefined) return {};
     let state: EnvelopeSettingsState;
     try {
       state = await Promise.resolve().then(readSettings);
@@ -169,20 +156,18 @@ export function createEnvelopeHooks(options: InjectEnvOptions = {}) {
     const report = quiet ? noop : warn;
     const setting = await readEnvFileSetting(report);
     if (setting === null) return null;
-    const target = resolveEnvFile(setting.envFile, env, home);
-    if (target === null) {
+    const path = resolveEnvFile(setting.envFile, home);
+    if (path === undefined) return null;
+    if (path === null) {
       report("envFile setting is not an absolute path");
       return null;
     }
-    const { path, configured } = target;
     let file: EnvFile;
     try {
       // No hook signal: Paseo only aborts once it stopped waiting, and the read is bounded anyway.
       file = await withTimeout(readShared(path), readTimeoutMs);
     } catch (error) {
-      const code = errorCode(error);
-      if (!configured && (code === "ENOENT" || code === "ENOTDIR")) return null;
-      report(`read failed: ${code}`);
+      report(`read failed: ${errorCode(error)}`);
       return null;
     }
 

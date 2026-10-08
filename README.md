@@ -29,16 +29,16 @@ Requirements:
    paseo plugin ls
    ```
 
-To install a reviewed commit rather than the latest `main`, add `--ref <commit>` to the install command. To update, run `paseo plugin update envelope`. It shows the available update and asks before applying it; `paseo plugin update envelope --check` only shows it, and `--ref <commit>` updates to a given commit. To remove the plugin, run `paseo plugin remove envelope`. Removing it also deletes its settings (see [Use another file](#use-another-file)) but not your `.env`. After removing or disabling it, agents that are already running keep the variables they received until their next session opening.
+To install a reviewed commit rather than the latest `main`, add `--ref <commit>` to the install command. To update, run `paseo plugin update envelope`. It shows the available update and asks before applying it; `paseo plugin update envelope --check` only shows it, and `--ref <commit>` updates to a given commit. To remove the plugin, run `paseo plugin remove envelope`. Removing it also deletes its settings (see [Set the path](#set-the-path)) but not your `.env`. After removing or disabling it, agents that are already running keep the variables they received until their next session opening.
 
 ## Write the `.env`
 
-By default, Envelope reads `$XDG_CONFIG_HOME/paseo-plugin-envelope/.env`, or `~/.config/paseo-plugin-envelope/.env` when `XDG_CONFIG_HOME` is unset, empty or not an absolute path. `XDG_CONFIG_HOME` is read from the daemon's environment. The desktop app loads your login shell's environment when it starts, and a daemon started from a terminal inherits that terminal's, so an `XDG_CONFIG_HOME` exported in your shell profile usually applies. A change to it only applies once the daemon has restarted.
+Envelope reads one file, at the path you set in its settings (see [Set the path](#set-the-path)). Until you set one, it injects nothing. The file can live anywhere the daemon's user can read; this README uses `~/.config/paseo-plugin-envelope/.env`.
 
 Create the directory and the file, readable by you only:
 
 ```sh
-dir="${XDG_CONFIG_HOME:-$HOME/.config}/paseo-plugin-envelope"
+dir="$HOME/.config/paseo-plugin-envelope"
 mkdir -p "$dir" && chmod 700 "$dir"
 touch "$dir/.env" && chmod 600 "$dir/.env"
 ```
@@ -67,13 +67,13 @@ EXAMPLE_API_TOKEN='value with # inside'
 export OPENAI_API_KEY=value
 ```
 
-### Use another file
+### Set the path
 
-To read another file, open Settings → Plugins → Envelope → Environment in the app and type its path in the **Path** field, then **Save**. Leave the field empty and save to go back to the default path.
+Open Settings → Plugins → Envelope → Environment in the app, type the file's path in the **Path** field, for example `~/.config/paseo-plugin-envelope/.env`, then **Save**. Leave the field empty and save to stop injecting.
 
-- The path must be absolute or start with `~/`, where `~` is the home directory of the daemon's user. Any other value makes Envelope warn and inject nothing, rather than fall back to the default file. The screen refuses to save a value that is clearly not absolute.
-- Under the field, a status line shows the path the next session opening will read, whether it comes from the setting or is the default path, and whether the daemon can read a regular file there: found, not found, not a regular file, or the error code of the check (`EACCES` when the daemon's user can't read it, or `ETIMEDOUT` after 5 seconds on a stalled mount). It also says when the setting isn't an absolute path, the path can't be resolved (for example without a home directory for `~`), or the settings are invalid. **Refresh** checks again, for example after you create the file. The check runs on the daemon and only looks at the file's type and read permission: it never opens the file, and never reads or sends its content.
-- Unlike the default file, a configured file that doesn't exist gets a warning in the logs.
+- The path must be absolute or start with `~/`, where `~` is the home directory of the daemon's user. Any other value makes Envelope warn and inject nothing. The screen refuses to save a value that is clearly not absolute.
+- Under the field, a status line shows **Not configured** while the path is empty, else the path the next session opening will read and whether the daemon can read a regular file there: found, not found, not a regular file, or the error code of the check (`EACCES` when the daemon's user can't read it, or `ETIMEDOUT` after 5 seconds on a stalled mount). It also says when the setting isn't an absolute path, the path can't be resolved (for example without a home directory for `~`), or the settings are invalid. **Refresh** checks again, for example after you create the file. The check runs on the daemon and only looks at the file's type and read permission: it never opens the file, and never reads or sends its content.
+- A configured file that doesn't exist gets a warning in the logs.
 - The setting is read again at every session opening, so a change applies at the next one, without reloading the plugin.
 - If two clients edit the path at the same time, the second save is refused: **Reload** discards your change and shows the saved path.
 
@@ -85,9 +85,13 @@ The setting is stored in `~/.paseo/plugin-settings/envelope/settings.json` (`<pa
 
 If the settings file isn't valid JSON or doesn't match this shape, Envelope warns and injects nothing, and the screen offers to reset it, which clears the saved path.
 
+### Upgrading from a version with a default path
+
+Earlier versions read `$XDG_CONFIG_HOME/paseo-plugin-envelope/.env`, or `~/.config/paseo-plugin-envelope/.env`, when no path was set. Envelope no longer has a default: if you relied on it, set the path to that file, otherwise your agents stop receiving its variables at their next session opening.
+
 ## When variables apply
 
-Envelope reads its settings and the file again every time an agent session opens: on create, resume, refresh and import. If the default file is missing, it does nothing.
+Envelope reads its settings and the file again every time an agent session opens: on create, resume, refresh and import. If no path is set, it reads nothing and logs nothing.
 
 An agent that is already running keeps the environment it started with. After you change the `.env` or the `envFile` setting, reload the agent so its session opens again:
 
@@ -116,7 +120,7 @@ When an agent is created, Envelope adds this guideline to its system prompt:
 > Your environment holds secrets that Paseo's Envelope plugin injected. Use them by reference ("$NAME") in the commands that need them. Never print a value: no `echo`, `env`, `printenv` or `set`, no `cat`, `grep` or `head` on a `.env` file, and no verbose or debug flag that prints auth headers. To check that a variable is set, run `[ -n "$NAME" ] && echo set`. If an expected variable is missing, tell the user instead of looking for the value elsewhere.
 
 - **Only when it injects something.** The guideline is added only when a later session opening of the agent would get at least one variable: the `.env` has a key that isn't protected and isn't set by the provider env, including the providers it `extends`. A `paseo run --env` key doesn't count, because Paseo drops it at the next session opening and the `.env` value then applies (see [Precedence](#precedence)). It names no variable.
-- **Checked once, at creation.** An agent created while the `.env` was missing or empty, or while its provider env set every key, never gets the guideline, even if it receives variables later.
+- **Checked once, at creation.** An agent created while no path was set, or while the `.env` was missing or empty, or while its provider env set every key, never gets the guideline, even if it receives variables later.
 - **Only for new agents.** Only agents created after Envelope is installed and enabled get it. Paseo only lets a plugin change the system prompt at creation: a session opening can only change the environment, so an existing agent never gets the guideline, even after a resume or refresh.
 - **Kept on resume.** Paseo stores the prompt with the agent and applies it again on resume and refresh.
 - **Appended, not replaced.** It comes after the agent's own system prompt, and before the text of Settings → Orchestration → Append system prompt, which Paseo adds afterwards.
@@ -210,7 +214,7 @@ The other lines are warnings. They carry no agent id, so match them to a session
 No line at all for a session means one of these:
 
 - Envelope isn't running: check that `paseo plugin ls` shows `envelope` as `running`, and that plugins are enabled.
-- The default file is missing, or isn't where the daemon looks (see [Write the `.env`](#write-the-env)). The status line in Settings → Plugins → Envelope → Environment shows the path the daemon reads and whether the file is there.
+- No path is set (see [Set the path](#set-the-path)). The status line in Settings → Plugins → Envelope → Environment shows **Not configured**, or the path the daemon reads and whether the file is there.
 - The file has no valid assignment.
 
 A variable missing from an agent can also come from a typo in the `.env`: dotenv skips malformed lines silently.

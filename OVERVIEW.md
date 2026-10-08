@@ -6,9 +6,11 @@ Agents receive the values themselves and can read, print or send them anywhere, 
 
 Envelope needs Paseo 0.11.0 or later, and `npm` on the daemon's `PATH` to install its `dotenv` dependency.
 
-By default the plugin reads `~/.config/paseo-plugin-envelope/.env`, or `paseo-plugin-envelope/.env` under the daemon's `$XDG_CONFIG_HOME` when it is set. Make the directory `chmod 700` and the file `chmod 600`: the plugin warns when group or others can read the file. The file uses dotenv syntax: `KEY=value` per line, no `$VAR` interpolation, and an unquoted `#` starts a comment, so quote values that contain one.
+Set the path of your `.env` in Settings → Plugins → Envelope → Environment, for example `~/.config/paseo-plugin-envelope/.env`. Until a path is set, the plugin reads nothing and injects nothing. The path must be absolute or start with `~/`. The change applies at the next session opening, without reloading the plugin. A status line under the field shows **Not configured**, or the path in effect and whether the daemon can read a regular file there, checked from its type and permissions without opening the file. The setting is stored in `~/.paseo/plugin-settings/envelope/settings.json` as `{"version": 1, "values": {"envFile": "~/path/to/.env"}}`, which you or an agent can also edit by hand.
 
-To read another file, set its path in Settings → Plugins → Envelope → Environment. The path must be absolute or start with `~/`; leave it empty to use the default path. The change applies at the next session opening, without reloading the plugin. A status line under the field shows the path in effect and whether the daemon can read a regular file there, checked from its type and permissions without opening the file. The setting is stored in `~/.paseo/plugin-settings/envelope/settings.json` as `{"version": 1, "values": {"envFile": "~/path/to/.env"}}`, which you or an agent can also edit by hand.
+Make the file's directory `chmod 700` and the file `chmod 600`: the plugin warns when group or others can read the file. The file uses dotenv syntax: `KEY=value` per line, no `$VAR` interpolation, and an unquoted `#` starts a comment, so quote values that contain one.
+
+Earlier versions read `~/.config/paseo-plugin-envelope/.env` (or under `$XDG_CONFIG_HOME`) when no path was set. That default is gone: if you relied on it, set the path to that file.
 
 The settings and the file are read again each time a session opens. A running agent keeps its environment until it is reloaded.
 
