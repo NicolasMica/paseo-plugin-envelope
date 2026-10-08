@@ -4,5 +4,6 @@
   "description": "Hands your .env variables to every agent when its session opens",
   "requirements": {
     "paseo": ">=0.11.0"
-  }
+  },
+  "build": [["npm", "ci", "--omit=dev", "--ignore-scripts"]]
 }

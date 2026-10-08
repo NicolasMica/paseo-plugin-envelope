@@ -3,6 +3,7 @@
 - Read `docs/design.md` before planning anything.
 - Pick the next step from the board, as described in [Project board](#project-board): anything In Progress first, then the first Todo item in board order. Move it to In Progress when you start.
 - Work one step at a time: plan only the next step, and discover the rest as we go.
+- Prefer a maintained package over our own code when one covers the need, to avoid maintenance. Write custom code only for what no package covers.
 - Track deferred work as GitHub issues in `NicolasMica/paseo-plugin-envelope`, never in TODO files or code comments. Give each issue a semantic title prefix (`feat:`, `fix:`, `chore:`, `docs:`, `test:`, `ci:`), add it to the Envelope project with `Priority` and `Version` set, and move it to its place in the Todo column.
 - When a step finishes, close its issue from the PR (`Closes #N`) and update `docs/design.md` if a decision changed.
 
