@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -9,6 +10,8 @@ import { parseEnvFile } from "./env-file";
 // Paseo 0.11.1 ignores `extends` on these ids (BUILTIN_PROVIDER_IDS in provider-registry.js).
 const BUILTIN_PROVIDERS = new Set(["claude", "codex", "copilot", "opencode", "pi", "omp"]);
 const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
+// A pasted token or base64 line ending in `=` parses as a key, so logs only name keys in the usual uppercase form and count the rest.
+const LOGGABLE_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
 export interface InjectEnvOptions {
   configTimeoutMs?: number;
@@ -38,6 +41,13 @@ function errorCode(error: unknown): string {
   return typeof code === "string" ? code : "UNKNOWN";
 }
 
+function describeNames(keys: string[]): string {
+  const shown = keys.filter((key) => LOGGABLE_NAME.test(key));
+  const hidden = keys.length - shown.length;
+  if (hidden > 0) shown.push(`${hidden} other name${hidden === 1 ? "" : "s"}`);
+  return shown.join(", ");
+}
+
 function isProtected(key: string): boolean {
   return PROTECTED_KEYS.has(key) || key.startsWith("PASEO_");
 }
@@ -52,22 +62,31 @@ export function envFilePath(env: NodeJS.ProcessEnv, home: () => string): string 
 interface EnvFile {
   content: string;
   mode: number;
+  /** Device, inode and mode, to warn about permissions once per file state. */
+  identity: string;
 }
 
-/** Reads the file once through one handle. Returns null when it doesn't exist; throws with the original error otherwise. */
+/**
+ * Reads the file once through one handle. Returns null when it doesn't exist; throws with the original error otherwise, or with `EISDIR` or `ENOTREG` when it isn't a regular file. `O_NONBLOCK` keeps a FIFO with no writer from hanging the open.
+ */
 async function readEnvFile(path: string): Promise<EnvFile | null> {
   let handle;
   try {
-    handle = await open(path, "r");
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch (error) {
     const code = errorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return null;
     throw error;
   }
   try {
-    const { mode } = await handle.stat();
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      throw Object.assign(new Error("not a regular file"), {
+        code: stats.isDirectory() ? "EISDIR" : "ENOTREG",
+      });
+    }
     const content = await handle.readFile("utf8");
-    return { content, mode };
+    return { content, mode: stats.mode, identity: `${stats.dev}:${stats.ino}:${stats.mode}` };
   } finally {
     await handle.close().catch(() => {});
   }
@@ -130,6 +149,7 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     homedir: home = homedir,
     platform = process.platform,
   } = options;
+  let warnedFor: string | undefined;
 
   async function inject(
     request: PluginSessionOpenRequest,
@@ -146,13 +166,18 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     if (file === null) return request;
 
     if (platform !== "win32" && (file.mode & 0o044) !== 0) {
-      warn(`${path} is readable by group or others, run chmod 600`);
+      if (warnedFor !== file.identity) {
+        warn(`${path} is readable by group or others, run chmod 600`);
+      }
+      warnedFor = file.identity;
+    } else {
+      warnedFor = undefined;
     }
 
     const prefix = `${request.agentId} (${request.reason})`;
     const parsed = Object.entries(parseEnvFile(file.content));
     const skipped = parsed.filter(([key]) => isProtected(key)).map(([key]) => key);
-    if (skipped.length > 0) log(`${prefix} skipped protected ${skipped.join(", ")}`);
+    if (skipped.length > 0) log(`${prefix} skipped protected ${describeNames(skipped)}`);
 
     const candidates = parsed.filter(
       ([key]) => !isProtected(key) && !Object.hasOwn(request.env, key),
@@ -177,7 +202,7 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     const injected = candidates.filter(([key]) => !providerKeys.has(key));
     if (injected.length === 0) return request;
 
-    log(`${prefix} ${injected.map(([key]) => key).join(", ")}`);
+    log(`${prefix} ${describeNames(injected.map(([key]) => key))}`);
     return { ...request, env: { ...request.env, ...Object.fromEntries(injected) } };
   }
 
