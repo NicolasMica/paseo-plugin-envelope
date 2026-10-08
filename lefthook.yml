@@ -11,3 +11,5 @@ pre-commit:
       run: npm run lint -- {staged_files}
     - name: typecheck
       run: npm run typecheck
+    - name: test
+      run: npm test

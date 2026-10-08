@@ -7,8 +7,8 @@ const accepted = () => true;
 
 function spyOnOutput() {
   const consoleSpies = Object.keys(console)
-    .filter((name) => typeof console[name as keyof Console] === "function")
-    .map((name) => vi.spyOn(console, name as keyof Console).mockImplementation(noop));
+    .filter((name): name is keyof Console => typeof Reflect.get(console, name) === "function")
+    .map((name) => vi.spyOn(console, name).mockImplementation(noop));
   return [
     ...consoleSpies,
     vi.spyOn(process, "emitWarning").mockImplementation(noop),
@@ -153,7 +153,8 @@ describe("prototype safety", () => {
     expect(result).toEqual({ A: "1" });
     expect(Object.hasOwn(result, "__proto__")).toBe(false);
     expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
-    expect(({} as Record<string, unknown>).x).toBeUndefined();
+    const plain: Record<string, unknown> = {};
+    expect(plain["x"]).toBeUndefined();
     expect(Object.hasOwn(Object.prototype, "x")).toBe(false);
   });
 
@@ -210,7 +211,9 @@ describe("secrecy", () => {
     }).not.toThrow();
 
     // Wait a tick so deferred output (microtasks, timers) would be caught too.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
     for (const spy of spies) {
       expect(spy).not.toHaveBeenCalled();
     }

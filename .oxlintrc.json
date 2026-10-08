@@ -1,28 +1,45 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "options": {
-    "typeAware": false
+    "typeAware": true,
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "error"
   },
   "plugins": ["unicorn", "typescript", "oxc", "import", "promise"],
   "categories": {
     "correctness": "error",
     "suspicious": "error",
-    "perf": "error"
+    "perf": "error",
+    "pedantic": "error"
   },
   "rules": {
+    // Off: sequential awaits are deliberate where order matters (a hook's per-file warning state, files written between calls), and parallel work uses Promise.all explicitly.
     "no-await-in-loop": "off",
 
     "no-unused-expressions": "error",
     "no-useless-catch": "error",
     "preserve-caught-error": "error",
+    // Off: an async function without await is the clearest way to write a Promise-returning mock or interface implementation; the type-aware promise rules catch the real mistakes.
     "require-await": "off",
+    // Off: same reason as require-await, for its type-aware twin.
+    "typescript/require-await": "off",
     "no-async-promise-executor": "error",
     "no-useless-escape": "error",
     "no-empty-pattern": "error",
     "no-self-assign": "error",
     "no-shadow": "error",
+    // Off: helpers that capture nothing stay next to their only caller (inside a describe block) for readability.
     "unicorn/consistent-function-scoping": "off",
-    "unicorn/no-array-sort": "off",
+    // Off: it counts every nested closure, so it measures hook factories and describe blocks by size, not complexity; complexity, max-depth and max-nested-callbacks bound that instead.
+    "max-lines-per-function": "off",
+    // Off: it demands deeply readonly parameter types, which the host's types (PluginServerContext, NodeJS.ProcessEnv, AbortSignal) can't satisfy.
+    "typescript/prefer-readonly-parameter-types": "off",
+    // Counts code only, so explanatory comments never push a file over the limit.
+    "max-lines": ["error", { "max": 300, "skipBlankLines": true, "skipComments": true }],
+    // Arrow shorthand callbacks like `() => resolve(value)` stay allowed; returning a void call elsewhere is still an error.
+    "typescript/no-confusing-void-expression": ["error", { "ignoreArrowShorthand": true }],
+    // Rejections we forward (a hook's failure, an abort reason) are unknown by nature; rejecting with `any` or a non-Error literal stays an error.
+    "typescript/prefer-promise-reject-errors": ["error", { "allowThrowingUnknown": true }],
 
     "unicorn/no-useless-spread": "error",
     "unicorn/no-useless-fallback-in-spread": "error",
@@ -42,6 +59,35 @@
     "typescript/no-unnecessary-type-assertion": "error",
     "typescript/consistent-type-definitions": ["error", "interface"],
 
+    // `void promise` would silence it, so a deliberately unawaited promise must handle its rejection with .catch instead.
+    "typescript/no-floating-promises": ["error", { "ignoreVoid": false }],
+    "typescript/no-misused-promises": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-enum-comparison": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-return": "error",
+    "typescript/no-unsafe-type-assertion": "error",
+    "typescript/no-unsafe-unary-minus": "error",
+    "typescript/strict-boolean-expressions": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/ban-ts-comment": [
+      "error",
+      {
+        "ts-expect-error": "allow-with-description",
+        "ts-ignore": true,
+        "ts-nocheck": true,
+        "ts-check": false,
+        "minimumDescriptionLength": 10
+      }
+    ],
+    // Coverage ignore hints need an explicit, reasoned oxlint-disable, so untested code can't hide behind them.
+    "no-warning-comments": [
+      "error",
+      { "terms": ["v8 ignore", "istanbul ignore", "c8 ignore"], "location": "anywhere" }
+    ],
+
     "import/no-unassigned-import": "error",
 
     "no-nested-ternary": "error",
@@ -50,5 +96,14 @@
     "complexity": ["error", { "max": 20 }],
     "max-depth": ["error", { "max": 4 }],
     "max-nested-callbacks": ["error", { "max": 3 }]
-  }
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.test.tsx"],
+      "rules": {
+        // Off in tests: one test file mirrors one module, so its cases stay in one place however many there are.
+        "max-lines": "off"
+      }
+    }
+  ]
 }
