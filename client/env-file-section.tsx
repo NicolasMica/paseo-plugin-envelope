@@ -73,7 +73,7 @@ export function EnvFileSection({ settings }: SettingsSectionProps) {
           label="Path"
           hint={HINT}
           initialValue={saved}
-          placeholder="Default path"
+          placeholder="~/.config/paseo-plugin-envelope/.env"
           onChangeText={changeText}
           disabled={settings.saving}
           error={formatError ?? saveError}
