@@ -1,0 +1,1 @@
+Envelope hands the variables of a `.env` file to every agent session when it opens, whether the session is created, resumed, refreshed or imported. Agents receive the values themselves and can read, print or send them anywhere, so only put in the file what every agent may see.
