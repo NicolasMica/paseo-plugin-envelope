@@ -8,4 +8,4 @@ To read another file, create or edit `~/.paseo/plugin-settings/envelope/settings
 
 ## Precedence
 
-A variable already set in the provider's env in Paseo's config, or passed when the agent is created, keeps its value. `PATH`, `HOME`, `SHELL`, `USER` and `PASEO_*` are never injected. The plugin logs only key names, never values.
+A variable already set in the provider's env in Paseo's config, or passed when the agent is created, keeps its value. `PATH`, `HOME`, `SHELL`, `USER` and `PASEO_*` are never injected. The plugin logs only counts and error codes, never names or values.

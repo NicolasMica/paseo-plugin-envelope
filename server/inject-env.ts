@@ -12,11 +12,10 @@ import type {
 import type { envelopeSettings } from "../shared/settings";
 import { parseEnvFile } from "./env-file";
 
-// Paseo 0.11.1 ignores `extends` on these ids (BUILTIN_PROVIDER_IDS in provider-registry.js).
-const BUILTIN_PROVIDERS = new Set(["claude", "codex", "copilot", "opencode", "pi", "omp"]);
 const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
-// A pasted token or base64 line ending in `=` parses as a key, so logs only name keys in the usual uppercase form and count the rest.
-const LOGGABLE_NAME = /^[A-Z_][A-Z0-9_]*$/;
+// Values must never reach logs, even through a crafted error, so only identifier-shaped names and codes are logged.
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+const ERROR_CODE = /^E[A-Z0-9]{1,31}$/;
 
 export type EnvelopeSettingsState = PluginSettingsState<typeof envelopeSettings.schema>;
 
@@ -33,7 +32,10 @@ export interface InjectEnvOptions {
 
 /** The part of the hook context the hook uses, so tests can pass a fake `paseo`. */
 export interface InjectEnvContext {
-  paseo: { config: { get(): Promise<{ config: unknown }> } };
+  paseo: {
+    config: { get(): Promise<{ config: unknown }> };
+    providers: { snapshot(): Promise<{ entries: unknown }> };
+  };
   signal: PluginHookContext["signal"];
 }
 
@@ -41,20 +43,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Reads `error[key]`, or undefined when a crafted getter or proxy throws. */
+function readField(error: object, key: string): unknown {
+  try {
+    return Reflect.get(error, key);
+  } catch {
+    return undefined;
+  }
+}
+
 function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : "UnknownError";
+  if (!(error instanceof Error)) return "UnknownError";
+  const name = readField(error, "name");
+  return typeof name === "string" && ERROR_NAME.test(name) ? name : "Error";
 }
 
 function errorCode(error: unknown): string {
-  const code = isRecord(error) ? error.code : undefined;
-  return typeof code === "string" ? code : "UNKNOWN";
-}
-
-function describeNames(keys: string[]): string {
-  const shown = keys.filter((key) => LOGGABLE_NAME.test(key));
-  const hidden = keys.length - shown.length;
-  if (hidden > 0) shown.push(`${hidden} other name${hidden === 1 ? "" : "s"}`);
-  return shown.join(", ");
+  const code = isRecord(error) ? readField(error, "code") : undefined;
+  return typeof code === "string" && ERROR_CODE.test(code) ? code : "UNKNOWN";
 }
 
 function isProtected(key: string): boolean {
@@ -113,8 +119,14 @@ async function readEnvFile(path: string, missingOk: boolean): Promise<EnvFile | 
   }
 }
 
-/** Collects the env keys of `start` and of the providers it `extends`, the way Paseo merges them. */
-export function providerEnvKeys(providers: unknown, start: string): Set<string> {
+/**
+ * Collects the env keys of `start` and of the providers it `extends`, the way Paseo merges them. `builtins` holds the ids whose `extends` Paseo ignores (getpaseo/paseo#3178); an id missing from it is followed, which can only skip more keys.
+ */
+export function providerEnvKeys(
+  providers: unknown,
+  start: string,
+  builtins: ReadonlySet<string>,
+): Set<string> {
   const keys = new Set<string>();
   if (!isRecord(providers)) return keys;
   const visited = new Set<string>();
@@ -127,8 +139,7 @@ export function providerEnvKeys(providers: unknown, start: string): Set<string> 
       for (const key of Object.keys(entry.env)) keys.add(key);
     }
     const base: unknown = entry.extends;
-    id =
-      !BUILTIN_PROVIDERS.has(id) && typeof base === "string" && base !== "acp" ? base : undefined;
+    id = !builtins.has(id) && typeof base === "string" && base !== "acp" ? base : undefined;
   }
   return keys;
 }
@@ -143,7 +154,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, signal: AbortSignal): P
     };
     const onAbort = () => settle(() => reject(signal.reason));
     const timer = setTimeout(
-      () => settle(() => reject(new DOMException("config read timed out", "TimeoutError"))),
+      () => settle(() => reject(new DOMException("timed out", "TimeoutError"))),
       ms,
     );
     if (signal.aborted) {
@@ -158,8 +169,22 @@ function withTimeout<T>(promise: Promise<T>, ms: number, signal: AbortSignal): P
   });
 }
 
+/** The provider ids the snapshot marks built-in. Throws a TypeError when the snapshot is malformed. */
+export function builtinProviders(snapshot: unknown): Set<string> {
+  const entries = isRecord(snapshot) ? snapshot.entries : undefined;
+  if (!Array.isArray(entries)) throw new TypeError("snapshot has no entries");
+  const builtins = new Set<string>();
+  for (const entry of entries as unknown[]) {
+    if (!isRecord(entry) || typeof entry.provider !== "string") {
+      throw new TypeError("malformed snapshot entry");
+    }
+    if (entry.source === "builtin") builtins.add(entry.provider);
+  }
+  return builtins;
+}
+
 /**
- * Builds the `agent.session_open` before-hook that injects the `.env` chosen by the settings, or the global default. It only ever logs key names, file paths, error codes and error names, never a value, and it never throws: on any failure it returns the request unchanged.
+ * Builds the `agent.session_open` before-hook that injects the `.env` chosen by the settings, or the global default. It only ever logs key counts, file paths, error codes and error names, never a key name or a value, and it never throws: on any failure it returns the request unchanged.
  */
 export function createSessionOpenHook(options: InjectEnvOptions = {}) {
   const {
@@ -228,35 +253,56 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     const content = await loadEnvFile();
     if (content === null) return request;
 
-    const prefix = `${request.agentId} (${request.reason})`;
     const parsed = Object.entries(parseEnvFile(content));
-    const skipped = parsed.filter(([key]) => isProtected(key)).map(([key]) => key);
-    if (skipped.length > 0) log(`${prefix} skipped protected ${describeNames(skipped)}`);
+    if (parsed.length === 0) return request;
+    const unprotected = parsed.filter(([key]) => !isProtected(key));
+    const candidates = unprotected.filter(([key]) => !Object.hasOwn(request.env, key));
+    const summarize = (injected: number) => {
+      const protectedCount = parsed.length - unprotected.length;
+      const alreadySet = unprotected.length - injected;
+      log(
+        `${request.agentId} (${request.reason}) injected ${injected}` +
+          (protectedCount > 0 ? `, skipped ${protectedCount} protected` : "") +
+          (alreadySet > 0 ? `, ${alreadySet} already set` : ""),
+      );
+    };
+    if (candidates.length === 0) {
+      summarize(0);
+      return request;
+    }
 
-    const candidates = parsed.filter(
-      ([key]) => !isProtected(key) && !Object.hasOwn(request.env, key),
-    );
-    if (candidates.length === 0) return request;
-
-    let response: { config: unknown };
-    try {
-      response = await withTimeout(
+    // allSettled observes both rejections, so one failing call never leaves the other unhandled.
+    const [configResult, snapshotResult] = await Promise.allSettled([
+      withTimeout(
         Promise.resolve().then(() => paseo.config.get()),
         configTimeoutMs,
         signal,
-      );
-    } catch (error) {
-      warn(`config read failed: ${errorName(error)}`);
+      ),
+      withTimeout(
+        Promise.resolve().then(() => paseo.providers.snapshot()),
+        configTimeoutMs,
+        signal,
+      ).then(builtinProviders),
+    ]);
+    if (configResult.status === "rejected") {
+      warn(`config read failed: ${errorName(configResult.reason)}`);
       return request;
     }
-    const { config } = response;
+    const { config } = configResult.value;
     if (!isRecord(config)) throw new TypeError("config is not an object");
+    let builtins: ReadonlySet<string>;
+    if (snapshotResult.status === "fulfilled") {
+      builtins = snapshotResult.value;
+    } else {
+      // Treating no provider as built-in follows every `extends`, which can only skip more keys.
+      warn(`provider snapshot failed: ${errorName(snapshotResult.reason)}`);
+      builtins = new Set();
+    }
 
-    const providerKeys = providerEnvKeys(config.providers, request.provider);
+    const providerKeys = providerEnvKeys(config.providers, request.provider, builtins);
     const injected = candidates.filter(([key]) => !providerKeys.has(key));
+    summarize(injected.length);
     if (injected.length === 0) return request;
-
-    log(`${prefix} ${describeNames(injected.map(([key]) => key))}`);
     return { ...request, env: { ...request.env, ...Object.fromEntries(injected) } };
   }
 

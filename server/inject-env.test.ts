@@ -10,8 +10,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import contribute from "../index.server";
 import { envelopeSettings } from "../shared/settings";
 import {
+  builtinProviders,
   createSessionOpenHook,
   envFilePath,
+  providerEnvKeys,
   resolveEnvFile,
   type EnvelopeSettingsState,
   type InjectEnvContext,
@@ -89,10 +91,28 @@ function makeRequest(overrides: Partial<PluginSessionOpenRequest> = {}): PluginS
   };
 }
 
+// Mirrors Paseo 0.11.1, where these ids are the built-in providers.
+const BUILTIN_SNAPSHOT = {
+  entries: ["claude", "codex", "copilot", "opencode", "pi", "omp"].map((provider) => ({
+    provider,
+    source: "builtin",
+  })),
+};
+
+type Get = InjectEnvContext["paseo"]["config"]["get"];
+type Snapshot = InjectEnvContext["paseo"]["providers"]["snapshot"];
+
+function contextWith(
+  get: Get,
+  signal = new AbortController().signal,
+  snapshot: Snapshot = async () => BUILTIN_SNAPSHOT,
+): InjectEnvContext {
+  return { paseo: { config: { get }, providers: { snapshot } }, signal };
+}
+
 function makeContext(providers: unknown = {}, signal = new AbortController().signal) {
   const get = vi.fn(async () => ({ requestId: "r", config: { providers } as unknown }));
-  const context: InjectEnvContext = { paseo: { config: { get } }, signal };
-  return { context, get };
+  return { context: contextWith(get, signal), get };
 }
 
 function ready(envFile?: string): () => Promise<EnvelopeSettingsState> {
@@ -338,14 +358,11 @@ describe("permission warning", () => {
 });
 
 describe("protected keys", () => {
-  it("skips PATH, HOME, SHELL, USER and PASEO_* and logs them by name", async () => {
+  it("skips PATH, HOME, SHELL, USER and PASEO_* and only counts them", async () => {
     const { result } = await run("PATH=1\nA=1\nHOME=1\nSHELL=1\nUSER=1\nPASEO_X=1");
 
     expect(result.env).toEqual({ A: "1" });
-    expect(lines).toEqual([
-      "agent-1 (create) skipped protected PATH, HOME, SHELL, USER, PASEO_X",
-      "agent-1 (create) A",
-    ]);
+    expect(lines).toEqual(["agent-1 (create) injected 1, skipped 5 protected"]);
   });
 
   it("does not protect PASEO alone or lowercase names", async () => {
@@ -360,6 +377,7 @@ describe("protected keys", () => {
 
     expect(result).toBe(request);
     expect(get).not.toHaveBeenCalled();
+    expect(lines).toEqual(["agent-1 (create) injected 0, skipped 2 protected"]);
   });
 
   it("skips config.get when the file has no key", async () => {
@@ -372,8 +390,8 @@ describe("protected keys", () => {
   });
 });
 
-describe("logged names", () => {
-  it("names only uppercase env-style keys and counts the others", async () => {
+describe("logged counts", () => {
+  it("never names a key, whatever its shape", async () => {
     const { result } = await run(
       "API_KEY=1\nhttp_proxy=x\nghp_AbCdEf1234567890=\nAbC123defGHI==\nmy.key=v",
     );
@@ -385,19 +403,24 @@ describe("logged names", () => {
       "AbC123defGHI",
       "my.key",
     ]);
-    expect(lines).toEqual(["agent-1 (create) API_KEY, 4 other names"]);
+    expect(lines).toEqual(["agent-1 (create) injected 5"]);
   });
 
-  it("uses the singular for one other name", async () => {
-    await run("A=1\nlower=2");
+  it("counts protected keys and keys already set by the request or the provider chain", async () => {
+    const providers = { mine: { extends: "base", env: { P: "1" } }, base: { env: { B: "1" } } };
+    const request = makeRequest({ provider: "mine", env: { R: "explicit" } });
 
-    expect(lines).toEqual(["agent-1 (create) A, 1 other name"]);
+    await run("PATH=1\nPASEO_lower=1\nR=f\nP=f\nB=f\nNEW=f", providers, request);
+
+    expect(lines).toEqual(["agent-1 (create) injected 1, skipped 2 protected, 3 already set"]);
   });
 
-  it("applies the same rule to skipped protected keys", async () => {
-    await run("PASEO_lower=1");
+  it("logs the summary when every key is already set by the request", async () => {
+    const request = makeRequest({ env: { A: "explicit" } });
 
-    expect(lines).toEqual(["agent-1 (create) skipped protected 1 other name"]);
+    await run("A=f\nPATH=f", {}, request);
+
+    expect(lines).toEqual(["agent-1 (create) injected 0, skipped 1 protected, 1 already set"]);
   });
 });
 
@@ -579,7 +602,7 @@ describe("precedence", () => {
     const { result } = await run("A=file\nB=file", {}, request);
 
     expect(result.env).toEqual({ A: "explicit", B: "file" });
-    expect(lines).toEqual(["agent-1 (create) B"]);
+    expect(lines).toEqual(["agent-1 (create) injected 1, 1 already set"]);
   });
 
   it("skips config.get when request.env already has every key", async () => {
@@ -588,6 +611,7 @@ describe("precedence", () => {
 
     expect(result).toBe(request);
     expect(get).not.toHaveBeenCalled();
+    expect(lines).toEqual(["agent-1 (create) injected 0, 1 already set"]);
   });
 
   it("does not inject a key from the provider env", async () => {
@@ -596,12 +620,12 @@ describe("precedence", () => {
     expect(result.env).toEqual({ B: "file" });
   });
 
-  it("returns the request unchanged and logs nothing when every key is shadowed", async () => {
+  it("returns the request unchanged and only logs counts when every key is shadowed", async () => {
     const request = makeRequest();
     const { result } = await run("A=file", { claude: { env: { A: "p" } } }, request);
 
     expect(result).toBe(request);
-    expect(lines).toEqual([]);
+    expect(lines).toEqual(["agent-1 (create) injected 0, 1 already set"]);
   });
 
   it("follows extends through custom providers down to a built-in", async () => {
@@ -659,7 +683,7 @@ describe("precedence", () => {
 
     const result = await makeHook()(
       { request: makeRequest() },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
+      contextWith(get, new AbortController().signal),
     );
 
     expect(result.env).toEqual({ A: "f" });
@@ -691,10 +715,7 @@ describe("config.get failures", () => {
       throw new RangeError("boom");
     });
 
-    const result = await makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
-    );
+    const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["config read failed: RangeError"]);
@@ -708,10 +729,7 @@ describe("config.get failures", () => {
       throw new Error("boom");
     };
 
-    const result = await makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
-    );
+    const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["config read failed: Error"]);
@@ -724,7 +742,7 @@ describe("config.get failures", () => {
 
     const result = await makeHook({ configTimeoutMs: 10 })(
       { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
+      contextWith(get, new AbortController().signal),
     );
 
     expect(result).toBe(request);
@@ -745,12 +763,11 @@ describe("config.get failures", () => {
     };
     let settled = false;
 
-    const pending = makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
-    ).finally(() => {
-      settled = true;
-    });
+    const pending = makeHook()({ request }, contextWith(get, new AbortController().signal)).finally(
+      () => {
+        settled = true;
+      },
+    );
     await getCalled;
     await vi.advanceTimersByTimeAsync(4999);
 
@@ -775,10 +792,7 @@ describe("config.get failures", () => {
     const request = makeRequest();
     const get = () => Promise.reject(Object.assign(Object.create(null), { name: "Fake" }));
 
-    const result = await makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
-    );
+    const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["config read failed: UnknownError"]);
@@ -790,10 +804,7 @@ describe("config.get failures", () => {
     const controller = new AbortController();
     const get = () => new Promise<never>(noop);
 
-    const pending = makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: controller.signal },
-    );
+    const pending = makeHook()({ request }, contextWith(get, controller.signal));
     controller.abort();
 
     expect(await pending).toBe(request);
@@ -805,10 +816,7 @@ describe("config.get failures", () => {
     const request = makeRequest();
     const get = vi.fn(() => new Promise<never>(noop));
 
-    const result = await makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: AbortSignal.abort() },
-    );
+    const result = await makeHook()({ request }, contextWith(get, AbortSignal.abort()));
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["config read failed: AbortError"]);
@@ -821,10 +829,7 @@ describe("unexpected errors", () => {
     const request = makeRequest();
     const get = async () => ({ config: null });
 
-    const result = await makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
-    );
+    const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["unexpected error: TypeError"]);
@@ -835,10 +840,7 @@ describe("unexpected errors", () => {
     const request = makeRequest();
     const get = async () => null as unknown as { config: unknown };
 
-    const result = await makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
-    );
+    const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["unexpected error: TypeError"]);
@@ -855,10 +857,7 @@ describe("unexpected errors", () => {
     });
     const get = async () => ({ config });
 
-    const result = await makeHook()(
-      { request },
-      { paseo: { config: { get } }, signal: new AbortController().signal },
-    );
+    const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["unexpected error: SyntaxError"]);
@@ -866,7 +865,7 @@ describe("unexpected errors", () => {
 });
 
 describe("result", () => {
-  it("leaves every field but env untouched and keeps file order in the log", async () => {
+  it("leaves every field but env untouched and keeps file order", async () => {
     const request = makeRequest({
       agentId: "agent-9",
       reason: "refresh",
@@ -877,8 +876,9 @@ describe("result", () => {
     const { result } = await run("Z=1\nA=2", {}, request);
 
     expect(result).toEqual({ ...request, env: { KEEP: "1", Z: "1", A: "2" } });
+    expect(Object.keys(result.env)).toEqual(["KEEP", "Z", "A"]);
     expect(request.env).toEqual({ KEEP: "1" });
-    expect(lines).toEqual(["agent-9 (refresh) Z, A"]);
+    expect(lines).toEqual(["agent-9 (refresh) injected 2"]);
   });
 });
 
@@ -917,8 +917,226 @@ describe("registration", () => {
   });
 });
 
+describe("provider snapshot", () => {
+  const chained = { claude: { extends: "other", env: {} }, other: { env: { A: "1" } } };
+
+  async function runWithSnapshot(snapshot: Snapshot, providers: unknown = chained) {
+    await writeEnv("A=f\nB=f");
+    const get = async () => ({ config: { providers } });
+    return makeHook({ configTimeoutMs: 20 })(
+      { request: makeRequest() },
+      contextWith(get, undefined, snapshot),
+    );
+  }
+
+  it("follows extends on an id the snapshot marks custom", async () => {
+    const result = await runWithSnapshot(async () => ({
+      entries: [{ provider: "claude", source: "custom" }],
+    }));
+
+    expect(result.env).toEqual({ B: "f" });
+    expect(warnings).toEqual([]);
+  });
+
+  it("follows extends on an id absent from the snapshot", async () => {
+    const result = await runWithSnapshot(async () => ({ entries: [] }));
+
+    expect(result.env).toEqual({ B: "f" });
+  });
+
+  it.each<[string, Snapshot, string]>([
+    [
+      "rejects",
+      async () => {
+        throw new RangeError("boom");
+      },
+      "RangeError",
+    ],
+    [
+      "throws synchronously",
+      () => {
+        throw new SyntaxError("boom");
+      },
+      "SyntaxError",
+    ],
+    ["times out", () => new Promise<never>(noop), "TimeoutError"],
+    ["has no entries array", async () => ({ entries: "nope" }), "TypeError"],
+    [
+      "has an entry without a provider",
+      async () => ({ entries: [{ source: "builtin" }] }),
+      "TypeError",
+    ],
+    ["is not an object", async () => null as unknown as { entries: unknown }, "TypeError"],
+  ])(
+    "warns and treats no provider as built-in when the snapshot %s",
+    async (_label, snapshot, name) => {
+      const result = await runWithSnapshot(snapshot);
+
+      expect(result.env).toEqual({ B: "f" });
+      expect(warnings).toEqual([`provider snapshot failed: ${name}`]);
+      expect(lines).toEqual(["agent-1 (create) injected 1, 1 already set"]);
+    },
+  );
+
+  it("only warns about config when both calls fail, leaving no rejection unhandled", async () => {
+    await writeEnv("A=f");
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const request = makeRequest();
+    const get = async () => {
+      throw new RangeError("config");
+    };
+    const snapshot = async () => {
+      throw new SyntaxError("snapshot");
+    };
+
+    const result = await makeHook()({ request }, contextWith(get, undefined, snapshot));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    process.off("unhandledRejection", unhandled);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["config read failed: RangeError"]);
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it("calls config.get and the snapshot in parallel", async () => {
+    await writeEnv("A=f");
+    const order: string[] = [];
+    let releaseGet: () => void = noop;
+    const get = () =>
+      new Promise<{ config: unknown }>((resolve) => {
+        order.push("get");
+        releaseGet = () => resolve({ config: {} });
+      });
+    const snapshot = async () => {
+      order.push("snapshot");
+      releaseGet();
+      return BUILTIN_SNAPSHOT;
+    };
+
+    const result = await makeHook()(
+      { request: makeRequest() },
+      contextWith(get, undefined, snapshot),
+    );
+
+    expect(order).toEqual(["get", "snapshot"]);
+    expect(result.env).toEqual({ A: "f" });
+  });
+
+  it("does not call the snapshot when no candidate remains", async () => {
+    await writeEnv("PATH=1");
+    const get = vi.fn(async () => ({ config: {} }));
+    const snapshot = vi.fn(async () => BUILTIN_SNAPSHOT);
+
+    await makeHook()({ request: makeRequest() }, contextWith(get, undefined, snapshot));
+
+    expect(snapshot).not.toHaveBeenCalled();
+  });
+
+  it("reads built-in ids from the snapshot entries", () => {
+    expect(
+      builtinProviders({
+        entries: [
+          { provider: "claude", source: "builtin" },
+          { provider: "mine", source: "custom" },
+          { provider: "bare" },
+        ],
+      }),
+    ).toEqual(new Set(["claude"]));
+    expect(() => builtinProviders({ entries: [null] })).toThrow(TypeError);
+    expect(() => builtinProviders({ entries: [{ provider: 1 }] })).toThrow(TypeError);
+  });
+
+  it("walks extends unless the current id is built-in", () => {
+    const providers = {
+      mine: { extends: "codex", env: { A: "1" } },
+      codex: { extends: "other", env: { B: "1" } },
+      other: { env: { C: "1" } },
+    };
+
+    expect(providerEnvKeys(providers, "mine", new Set(["codex"]))).toEqual(new Set(["A", "B"]));
+    expect(providerEnvKeys(providers, "mine", new Set())).toEqual(new Set(["A", "B", "C"]));
+    expect(providerEnvKeys(null, "mine", new Set())).toEqual(new Set());
+  });
+});
+
+describe("error output", () => {
+  async function failConfig(error: unknown) {
+    await writeEnv("A=1");
+    const get = async () => {
+      throw error;
+    };
+    await makeHook()({ request: makeRequest() }, contextWith(get));
+    return warnings;
+  }
+
+  it.each([
+    ["a name with spaces", "Leak s3cr3t"],
+    ["a name with symbols", "s3cr3t-value"],
+    ["a name starting with a digit", "1Error"],
+    ["an empty name", ""],
+    ["a name longer than 64 characters", `A${"b".repeat(64)}`],
+  ])("logs Error for %s", async (_label, name) => {
+    const error = new Error("boom");
+    error.name = name;
+
+    expect(await failConfig(error)).toEqual(["config read failed: Error"]);
+  });
+
+  it("keeps a 64-character identifier name", async () => {
+    const error = new Error("boom");
+    error.name = `A${"b".repeat(63)}`;
+
+    expect(await failConfig(error)).toEqual([`config read failed: ${error.name}`]);
+  });
+
+  it("logs Error when the name is not a string or its getter throws", async () => {
+    const nonString = Object.assign(new Error("boom"), { name: 42 });
+    const throwing = new Error("boom");
+    Object.defineProperty(throwing, "name", {
+      get() {
+        throw new Error("s3cr3t");
+      },
+    });
+
+    expect(await failConfig(nonString)).toEqual(["config read failed: Error"]);
+    expect(await failConfig(throwing)).toEqual([
+      "config read failed: Error",
+      "config read failed: Error",
+    ]);
+  });
+
+  it.each([
+    ["a lowercase code", "enoent"],
+    ["a code with spaces", "ENOENT s3cr3t"],
+    ["a code not starting with E", "XERR"],
+    ["a bare E", "E"],
+    ["a code longer than 32 characters", `E${"A".repeat(32)}`],
+  ])("logs UNKNOWN for %s", async (_label, code) => {
+    vi.mocked(open).mockRejectedValueOnce(Object.assign(new Error("boom"), { code }));
+
+    await makeHook()({ request: makeRequest() }, makeContext().context);
+
+    expect(warnings).toEqual(["read failed: UNKNOWN"]);
+  });
+
+  it("logs UNKNOWN when the code getter throws", async () => {
+    const error = new Error("boom");
+    Object.defineProperty(error, "code", {
+      get() {
+        throw new Error("s3cr3t");
+      },
+    });
+    vi.mocked(open).mockRejectedValueOnce(error);
+
+    await makeHook()({ request: makeRequest() }, makeContext().context);
+
+    expect(warnings).toEqual(["read failed: UNKNOWN"]);
+  });
+});
+
 describe("secrecy", () => {
-  it("never leaks a value", async () => {
+  it("never logs a key name or a value", async () => {
     const spies = spyOnOutput();
     const sentinels = {
       injected: "s3cr3t-injected",
@@ -928,66 +1146,64 @@ describe("secrecy", () => {
       shadowedProvider: "s3cr3t-provider",
     };
     const content = [
-      `INJECTED=${sentinels.injected}`,
+      `S3CR3T_INJECTED=${sentinels.injected}`,
       `PATH=${sentinels.protectedPath}`,
-      `PASEO_TOKEN=${sentinels.protectedPaseo}`,
-      `REQ=${sentinels.shadowedRequest}`,
-      `PROV=${sentinels.shadowedProvider}`,
-      // A pasted token parses as a key, so key names count as secrets unless they look like env names.
+      `PASEO_S3CR3T_TOKEN=${sentinels.protectedPaseo}`,
+      `S3CR3T_REQ=${sentinels.shadowedRequest}`,
+      `S3CR3T_PROV=${sentinels.shadowedProvider}`,
+      // A malformed file can turn a value fragment into a key, so no key name is ever logged.
       "ghp_s3cr3tTOKEN=",
+      "AKIAS3CR3TFRAGMENT=",
       "PASEO_s3cr3tlower=x",
     ].join("\n");
-    const secretKeys = ["ghp_s3cr3tTOKEN", "PASEO_s3cr3tlower"];
+    const keys = [
+      "S3CR3T_INJECTED",
+      "PATH",
+      "PASEO_S3CR3T_TOKEN",
+      "S3CR3T_REQ",
+      "S3CR3T_PROV",
+      "ghp_s3cr3tTOKEN",
+      "AKIAS3CR3TFRAGMENT",
+      "PASEO_s3cr3tlower",
+    ];
     // Group-readable so the permission warning fires too.
     await writeEnv(content, 0o644);
     const hook = createSessionOpenHook({ env: { XDG_CONFIG_HOME: xdg } });
-    const signal = new AbortController().signal;
-    const ok = {
-      paseo: {
-        config: {
-          get: async () => ({ config: { providers: { claude: { env: { PROV: "p" } } } } }),
-        },
-      },
-      signal,
+    const okGet = async () => ({
+      config: { providers: { claude: { env: { S3CR3T_PROV: "p" } } } },
+    });
+    const ok = contextWith(okGet);
+    const leakyError = (message: string, name: string) => {
+      const error = new Error(`${message} ${sentinels.injected}`);
+      error.name = name;
+      return error;
     };
-    const rejecting = {
-      paseo: {
-        config: {
-          get: async () => {
-            const error = new Error(`config ${sentinels.injected}`);
-            error.name = "ConfigError";
-            throw error;
-          },
+    const contexts: InjectEnvContext[] = [
+      contextWith(async () => {
+        throw leakyError("config", "ConfigError");
+      }),
+      contextWith(async () => {
+        throw leakyError("config", `Leak ${sentinels.injected}`);
+      }),
+      contextWith(async () => ({
+        get config(): unknown {
+          throw new Error(`getter ${sentinels.injected}`);
         },
-      },
-      signal,
-    };
-    const throwing = {
-      paseo: {
-        config: {
-          get: async () => ({
-            get config(): unknown {
-              throw new Error(`getter ${sentinels.injected}`);
-            },
-          }),
-        },
-      },
-      signal,
-    };
-    const request = makeRequest({ env: { REQ: "r" } });
-
-    const results = [
-      await hook({ request }, ok),
-      await hook({ request }, rejecting),
-      await hook({ request }, throwing),
-      await hook(
-        { request },
-        {
-          paseo: { config: { get: () => new Promise<never>(noop) } },
-          signal: AbortSignal.abort(new Error(sentinels.injected)),
-        },
-      ),
+      })),
+      contextWith(() => new Promise<never>(noop), AbortSignal.abort(new Error(sentinels.injected))),
+      contextWith(okGet, undefined, async () => {
+        throw leakyError("snapshot", sentinels.injected);
+      }),
+      contextWith(okGet, undefined, async () => ({
+        entries: [{ provider: sentinels.injected, source: 1 }, 2],
+      })),
     ];
+    const request = makeRequest({ env: { S3CR3T_REQ: "r" } });
+
+    const results = [await hook({ request }, ok)];
+    for (const context of contexts) results.push(await hook({ request }, context));
+    await writeEnv("PATH=1\nS3CR3T_REQ=x", 0o600);
+    const allSkipped = await hook({ request }, ok);
     await mkdir(join(xdg, "dir-case", "paseo-plugin-envelope", ".env"), { recursive: true });
     results.push(
       await createSessionOpenHook({ env: { XDG_CONFIG_HOME: join(xdg, "dir-case") } })(
@@ -1011,6 +1227,10 @@ describe("secrecy", () => {
         ),
       );
     }
+    vi.mocked(open).mockRejectedValueOnce(
+      Object.assign(new Error(sentinels.injected), { code: `E ${sentinels.injected}` }),
+    );
+    results.push(await hook({ request }, ok));
 
     // Wait a tick so deferred output (microtasks, timers) would be caught too.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1019,22 +1239,32 @@ describe("secrecy", () => {
       .flat()
       .map(String)
       .join("\n");
-    expect(output).toContain("INJECTED");
+    expect(output).toContain("agent-1 (create) injected 3, skipped 3 protected, 2 already set");
+    expect(output).toContain("agent-1 (create) injected 0, skipped 1 protected, 1 already set");
     expect(output).toContain("config read failed: ConfigError");
+    expect(output).toContain("config read failed: Error");
+    expect(output).toContain("provider snapshot failed: Error");
+    expect(output).toContain("provider snapshot failed: TypeError");
     expect(output).toContain("read failed: EISDIR");
     expect(output).toContain("settings invalid");
     expect(output).toContain("settings read failed: Error");
     expect(output).toContain("envFile setting is not an absolute path");
     expect(output).toContain("read failed: ENOENT");
-    for (const sentinel of [...Object.values(sentinels), ...secretKeys]) {
-      expect(output).not.toContain(sentinel);
+    expect(output).toContain("read failed: UNKNOWN");
+    for (const secret of [...Object.values(sentinels), ...keys]) {
+      expect(output).not.toContain(secret);
     }
-    expect(results[0]?.env).toEqual({
-      REQ: "r",
-      INJECTED: sentinels.injected,
+    const injected = {
+      S3CR3T_REQ: "r",
+      S3CR3T_INJECTED: sentinels.injected,
       ghp_s3cr3tTOKEN: "",
-    });
-    for (const result of results.slice(1)) {
+      AKIAS3CR3TFRAGMENT: "",
+    };
+    expect(results[0]?.env).toEqual(injected);
+    expect(results[5]?.env).toEqual(injected);
+    expect(results[6]?.env).toEqual(injected);
+    expect(allSkipped).toBe(request);
+    for (const result of [...results.slice(1, 5), ...results.slice(7)]) {
       expect(result).toBe(request);
     }
   });
