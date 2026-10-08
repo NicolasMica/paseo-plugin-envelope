@@ -6,12 +6,12 @@ const noop = () => {};
 const accepted = () => true;
 
 function spyOnOutput() {
+  const consoleSpies = Object.keys(console)
+    .filter((name) => typeof console[name as keyof Console] === "function")
+    .map((name) => vi.spyOn(console, name as keyof Console).mockImplementation(noop));
   return [
-    vi.spyOn(console, "log").mockImplementation(noop),
-    vi.spyOn(console, "info").mockImplementation(noop),
-    vi.spyOn(console, "warn").mockImplementation(noop),
-    vi.spyOn(console, "error").mockImplementation(noop),
-    vi.spyOn(console, "debug").mockImplementation(noop),
+    ...consoleSpies,
+    vi.spyOn(process, "emitWarning").mockImplementation(noop),
     vi.spyOn(process.stdout, "write").mockImplementation(accepted),
     vi.spyOn(process.stderr, "write").mockImplementation(accepted),
   ];
@@ -157,6 +157,15 @@ describe("prototype safety", () => {
     expect(Object.hasOwn(Object.prototype, "x")).toBe(false);
   });
 
+  it("returns built-in method names as plain values", () => {
+    const result = parseEnvFile("hasOwnProperty=x\ntoString=y");
+
+    expect(Object.entries(result)).toEqual([
+      ["hasOwnProperty", "x"],
+      ["toString", "y"],
+    ]);
+  });
+
   it("returns a plain object", () => {
     const result = parseEnvFile("A=1");
 
@@ -170,7 +179,7 @@ describe("secrecy", () => {
     vi.restoreAllMocks();
   });
 
-  it("never leaks a value", () => {
+  it("never leaks a value", async () => {
     const spies = spyOnOutput();
     const skipped = {
       badLine: "s3cr3t-bad-line",
@@ -179,6 +188,7 @@ describe("secrecy", () => {
       colonNoSpace: "s3cr3t-colon-no-space",
       proto: "s3cr3t-proto",
       quotedProto: "s3cr3t-quoted-proto",
+      comment: "s3cr3t-comment",
     };
     const content = [
       `bad line ${skipped.badLine}`,
@@ -189,7 +199,7 @@ describe("secrecy", () => {
       `__proto__="${skipped.quotedProto}"`,
       'UNTERM="s3cr3t-unterminated',
       'TRAILING="s3cr3t-trailing" junk',
-      "UNQUOTED=s3cr3t-unquoted#s3cr3t-comment",
+      `UNQUOTED=s3cr3t-unquoted#${skipped.comment}`,
       "MULTI='s3cr3t-multi",
       "line'",
     ].join("\n");
@@ -199,12 +209,14 @@ describe("secrecy", () => {
       result = parseEnvFile(content);
     }).not.toThrow();
 
+    // Wait a tick so deferred output (microtasks, timers) would be caught too.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     for (const spy of spies) {
       expect(spy).not.toHaveBeenCalled();
     }
-    const values = Object.values(result).join("\n");
+    const parsed = [...Object.keys(result), ...Object.values(result)].join("\n");
     for (const sentinel of Object.values(skipped)) {
-      expect(values).not.toContain(sentinel);
+      expect(parsed).not.toContain(sentinel);
     }
   });
 });
