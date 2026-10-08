@@ -111,7 +111,8 @@ When an agent is created, Envelope adds this guideline to its system prompt:
 >
 > Your environment holds secrets that Paseo's Envelope plugin injected. Use them by reference ("$NAME") in the commands that need them. Never print a value: no `echo`, `env`, `printenv` or `set`, no `cat`, `grep` or `head` on a `.env` file, and no verbose or debug flag that prints auth headers. To check that a variable is set, run `[ -n "$NAME" ] && echo set`. If an expected variable is missing, tell the user instead of looking for the value elsewhere.
 
-- **Only when it injects something.** The guideline is added only when Envelope would inject at least one variable into the new agent, with the same rules as [Precedence](#precedence). It names no variable.
+- **Only when it injects something.** The guideline is added only when a later session opening of the agent would get at least one variable: the `.env` has a key that isn't protected and isn't set by the provider env, including the providers it `extends`. A `paseo run --env` key doesn't count, because Paseo drops it at the next session opening and the `.env` value then applies (see [Precedence](#precedence)). It names no variable.
+- **Checked once, at creation.** An agent created while the `.env` was missing or empty, or while its provider env set every key, never gets the guideline, even if it receives variables later.
 - **Only for new agents.** Only agents created after Envelope is installed and enabled get it. Paseo only lets a plugin change the system prompt at creation: a session opening can only change the environment, so an existing agent never gets the guideline, even after a resume or refresh.
 - **Kept on resume.** Paseo stores the prompt with the agent and applies it again on resume and refresh.
 - **Appended, not replaced.** It comes after the agent's own system prompt, and before the text of Settings → Orchestration → Append system prompt, which Paseo adds afterwards.

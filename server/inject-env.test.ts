@@ -13,7 +13,6 @@ import { envelopeSettings } from "../shared/settings";
 import {
   builtinProviders,
   createEnvelopeHooks,
-  createSessionOpenHook,
   envFilePath,
   providerEnvKeys,
   resolveEnvFile,
@@ -78,7 +77,7 @@ async function writeEnv(content: string, mode = 0o600) {
 }
 
 function makeHook(options: InjectEnvOptions = {}) {
-  return createSessionOpenHook({
+  return createEnvelopeHooks({
     env: { XDG_CONFIG_HOME: xdg },
     log: (line) => {
       lines.push(line);
@@ -88,7 +87,7 @@ function makeHook(options: InjectEnvOptions = {}) {
     },
     platform: "darwin",
     ...options,
-  });
+  }).sessionOpen;
 }
 
 function makeRequest(overrides: Partial<PluginSessionOpenRequest> = {}): PluginSessionOpenRequest {
@@ -1320,7 +1319,7 @@ describe("secrecy", () => {
     ];
     // Group-readable so the permission warning fires too.
     await writeEnv(content, 0o644);
-    const hook = createSessionOpenHook({ env: { XDG_CONFIG_HOME: xdg } });
+    const hook = createEnvelopeHooks({ env: { XDG_CONFIG_HOME: xdg } }).sessionOpen;
     const okGet = async () => ({
       config: { providers: { claude: { env: { S3CR3T_PROV: "p" } } } },
     });
@@ -1358,7 +1357,7 @@ describe("secrecy", () => {
     const allSkipped = await hook({ request }, ok);
     await mkdir(join(xdg, "dir-case", "paseo-plugin-envelope", ".env"), { recursive: true });
     results.push(
-      await createSessionOpenHook({ env: { XDG_CONFIG_HOME: join(xdg, "dir-case") } })(
+      await createEnvelopeHooks({ env: { XDG_CONFIG_HOME: join(xdg, "dir-case") } }).sessionOpen(
         { request },
         ok,
       ),
@@ -1373,7 +1372,7 @@ describe("secrecy", () => {
     ];
     for (const readSettings of settingsCases) {
       results.push(
-        await createSessionOpenHook({ env: { XDG_CONFIG_HOME: xdg }, readSettings })(
+        await createEnvelopeHooks({ env: { XDG_CONFIG_HOME: xdg }, readSettings }).sessionOpen(
           { request },
           ok,
         ),

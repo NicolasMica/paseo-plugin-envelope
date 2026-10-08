@@ -10,7 +10,7 @@ import type {
 
 import type { envelopeSettings } from "../shared/settings";
 import { parseEnvFile } from "./env-file";
-import { SECRETS_GUIDELINE } from "./guideline";
+import { SECRETS_GUIDELINE, hasSecretsGuideline } from "./guideline";
 import { readEnvFile, withTimeout, type EnvFile } from "./read-file";
 
 const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
@@ -301,14 +301,10 @@ export function createEnvelopeHooks(options: InjectEnvOptions = {}) {
     context: InjectEnvContext,
   ): Promise<AgentCreateRequest> {
     const existing = request.config.systemPrompt ?? "";
-    // A stored agent without a provider handle is re-created with its persisted prompt, guideline included.
-    if (existing.includes(SECRETS_GUIDELINE)) return request;
-    const injection = await computeInjection(
-      request.config.provider,
-      request.env ?? {},
-      context,
-      true,
-    );
+    // A stored agent without a provider handle is re-created with its persisted prompt, guideline included, maybe in older wording.
+    if (hasSecretsGuideline(existing)) return request;
+    // The create env is ignored: Paseo drops it at the next session opening, where the `.env` value then applies.
+    const injection = await computeInjection(request.config.provider, {}, context, true);
     if (injection === null || injection.injected.length === 0) return request;
     const systemPrompt =
       existing.trim() === "" ? SECRETS_GUIDELINE : `${existing}\n\n${SECRETS_GUIDELINE}`;
@@ -338,9 +334,4 @@ export function createEnvelopeHooks(options: InjectEnvOptions = {}) {
       }
     },
   };
-}
-
-/** The `agent.session_open` hook of `createEnvelopeHooks`, on its own state. */
-export function createSessionOpenHook(options: InjectEnvOptions = {}) {
-  return createEnvelopeHooks(options).sessionOpen;
 }

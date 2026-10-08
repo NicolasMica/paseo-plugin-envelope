@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { PluginBeforeRequests } from "@getpaseo/plugin/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SECRETS_GUIDELINE } from "./guideline";
+import { SECRETS_GUIDELINE, SECRETS_GUIDELINE_HEADING } from "./guideline";
 import { createEnvelopeHooks, type InjectEnvContext, type InjectEnvOptions } from "./inject-env";
 
 // Pass-through by default, so a test can stall one `open`.
@@ -122,7 +122,10 @@ function makeSessionRequest() {
 
 describe("secrets guideline text", () => {
   it("is the documented text and names no variable", () => {
-    expect(SECRETS_GUIDELINE).toMatch(/^## Environment secrets\n\nYour environment holds/u);
+    expect(SECRETS_GUIDELINE_HEADING).toBe("## Environment secrets");
+    expect(
+      SECRETS_GUIDELINE.startsWith(`${SECRETS_GUIDELINE_HEADING}\n\nYour environment holds`),
+    ).toBe(true);
     expect(SECRETS_GUIDELINE).toContain('[ -n "$NAME" ] && echo set');
     expect(SECRETS_GUIDELINE).not.toMatch(/\$(?!NAME\b)[A-Z_]/u);
   });
@@ -162,12 +165,39 @@ describe("appending the guideline", () => {
     expect(request.config.systemPrompt).toBe("Be terse.");
   });
 
-  it("appends when only some keys are already set", async () => {
+  it("appends when the provider env only sets some keys", async () => {
     await writeEnv("A=1\nB=2\nPATH=/x");
 
-    const { result } = await create(makeRequest({}, { A: "0" }), { claude: { env: { C: "0" } } });
+    const { result } = await create(makeRequest(), { claude: { env: { A: "0", C: "0" } } });
 
     expect(result.config.systemPrompt).toBe(SECRETS_GUIDELINE);
+  });
+
+  it("appends even when the create env sets every key, since a resume drops it and injects the .env", async () => {
+    await writeEnv("A=1\nB=2");
+    const request = makeRequest({}, { A: "0", B: "0" });
+
+    const { result, get } = await create(request);
+
+    expect(result).toEqual({
+      config: { ...request.config, systemPrompt: SECRETS_GUIDELINE },
+      env: { A: "0", B: "0" },
+    });
+    expect(get).toHaveBeenCalledOnce();
+    expect(output).toEqual([]);
+  });
+
+  it.each([
+    "See the Environment secrets section.",
+    "Read ## Environment secrets below.",
+    "### Environment secrets",
+    "## Environment secrets and more",
+  ])("appends when the prompt only mentions the heading: %j", async (prompt) => {
+    await writeEnv("A=1");
+
+    const { result } = await create(makeRequest({ systemPrompt: prompt }));
+
+    expect(result.config.systemPrompt).toBe(`${prompt}\n\n${SECRETS_GUIDELINE}`);
   });
 
   it("reads the env of the config's provider, not another one", async () => {
@@ -215,16 +245,6 @@ describe("not appending the guideline", () => {
     await writeEnv("PATH=/x\nPASEO_X=1");
 
     const { request, result, get } = await create();
-
-    expect(result).toBe(request);
-    expect(get).not.toHaveBeenCalled();
-    expect(output).toEqual([]);
-  });
-
-  it("does nothing without reading the config when the create env sets every key", async () => {
-    await writeEnv("A=1\nB=2");
-
-    const { request, result, get } = await create(makeRequest({}, { A: "0", B: "0" }));
 
     expect(result).toBe(request);
     expect(get).not.toHaveBeenCalled();
@@ -366,6 +386,20 @@ describe("not appending the guideline", () => {
 
     expect(result).toBe(request);
     expect(open).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "Be terse.\n\n## Environment secrets\n\nAn older wording of the guideline.",
+    "Be terse.\r\n  ## Environment secrets  \r\nOlder wording.",
+    "## Environment secrets",
+  ])("does not append again under an existing heading line: %j", async (prompt) => {
+    await writeEnv("A=1");
+    const request = makeRequest({ systemPrompt: prompt });
+
+    const { result, get } = await create(request);
+
+    expect(result).toBe(request);
     expect(get).not.toHaveBeenCalled();
   });
 });
