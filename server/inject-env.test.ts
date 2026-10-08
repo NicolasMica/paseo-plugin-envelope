@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/pro
 import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
@@ -324,6 +325,107 @@ describe("filesystem failures", () => {
 
     expect(result.env).toEqual({ A: "1" });
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("stalled reads", () => {
+  /** An `open` that settles only when the test says so, as on a stalled network mount. */
+  function stallOpen() {
+    let release: (outcome: FileHandle | Error) => void = noop;
+    const stalled = new Promise<FileHandle>((resolve, reject) => {
+      release = (outcome) => {
+        if (outcome instanceof Error) {
+          reject(outcome);
+        } else {
+          resolve(outcome);
+        }
+      };
+    });
+    vi.mocked(open).mockReturnValueOnce(stalled);
+    return release;
+  }
+
+  it("returns the request unchanged and logs ETIMEDOUT when the read never settles", async () => {
+    await writeEnv("A=1");
+    stallOpen();
+    const request = makeRequest();
+    const { context, get } = makeContext();
+
+    const result = await makeHook({ readTimeoutMs: 10 })({ request }, context);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["read failed: ETIMEDOUT"]);
+    expect(lines).toEqual([]);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("times out after 5 s by default", async () => {
+    await writeEnv("A=1");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    stallOpen();
+    const request = makeRequest();
+    let settled = false;
+
+    const pending = makeHook()({ request }, makeContext().context).finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(4999);
+
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toBe(request);
+    expect(warnings).toEqual(["read failed: ETIMEDOUT"]);
+  });
+
+  it("bounds the read after open, not only open", async () => {
+    await writeEnv("A=1");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const handle = await actual.open(envPath());
+    handle.readFile = () => new Promise<never>(noop);
+    vi.mocked(open).mockResolvedValueOnce(handle);
+    const request = makeRequest();
+
+    const result = await makeHook({ readTimeoutMs: 10 })({ request }, makeContext().context);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["read failed: ETIMEDOUT"]);
+    await handle.close();
+  });
+
+  it("shares a stalled read between session openings instead of blocking another thread", async () => {
+    await writeEnv("A=1");
+    const release = stallOpen();
+    const hook = makeHook({ readTimeoutMs: 10 });
+    const { context } = makeContext();
+
+    expect(await hook({ request: makeRequest() }, context)).toEqual(makeRequest());
+    expect(await hook({ request: makeRequest() }, context)).toEqual(makeRequest());
+    expect(open).toHaveBeenCalledTimes(1);
+
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    release(await actual.open(envPath()));
+    // The released read is still in flight, so this opening waits for it instead of opening again.
+    expect((await hook({ request: makeRequest() }, context)).env).toEqual({ A: "1" });
+    expect(open).toHaveBeenCalledTimes(1);
+    // Once it settled, the next opening reads the file afresh.
+    expect((await hook({ request: makeRequest() }, context)).env).toEqual({ A: "1" });
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(warnings).toEqual(["read failed: ETIMEDOUT", "read failed: ETIMEDOUT"]);
+  });
+
+  it("ignores a stalled read that fails after the timeout, and reads again next time", async () => {
+    await writeEnv("A=1");
+    const release = stallOpen();
+    const hook = makeHook({ readTimeoutMs: 10 });
+    const { context } = makeContext();
+
+    await hook({ request: makeRequest() }, context);
+    release(Object.assign(new Error("late"), { code: "EIO" }));
+    await nextTurn();
+
+    expect((await hook({ request: makeRequest() }, context)).env).toEqual({ A: "1" });
+
+    expect(warnings).toEqual(["read failed: ETIMEDOUT"]);
   });
 });
 
@@ -835,6 +937,18 @@ describe("config.get failures", () => {
     const get = vi.fn<Get>(() => new Promise<never>(noop));
 
     const result = await makeHook()({ request }, contextWith(get, AbortSignal.abort()));
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["config read failed: AbortError"]);
+  });
+
+  it("handles a config.get rejection that follows an early abort", async () => {
+    await writeEnv("A=1");
+    const request = makeRequest();
+    const get = () => Promise.reject(new Error("late"));
+
+    const result = await makeHook()({ request }, contextWith(get, AbortSignal.abort()));
+    await nextTurn();
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["config read failed: AbortError"]);

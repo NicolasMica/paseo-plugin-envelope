@@ -23,6 +23,8 @@ export interface InjectEnvOptions {
   /** Reads the plugin settings on every session open. Absent means no settings: the default path applies. */
   readSettings?: () => Promise<EnvelopeSettingsState>;
   configTimeoutMs?: number;
+  /** Bounds the whole `.env` read: a file on a stalled mount can block `open`, `stat` or `read` with no limit. */
+  readTimeoutMs?: number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
   env?: NodeJS.ProcessEnv;
@@ -96,17 +98,10 @@ interface EnvFile {
 }
 
 /**
- * Reads the file once through one handle. Returns null when it doesn't exist and `missingOk` is set; throws with the original error otherwise, or with `EISDIR` or `ENOTREG` when it isn't a regular file. `O_NONBLOCK` keeps a FIFO with no writer from hanging the open.
+ * Reads the file once through one handle. Throws with the original error, or with `EISDIR` or `ENOTREG` when it isn't a regular file. `O_NONBLOCK` keeps a FIFO with no writer from hanging the open.
  */
-async function readEnvFile(path: string, missingOk: boolean): Promise<EnvFile | null> {
-  let handle;
-  try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-  } catch (error) {
-    const code = errorCode(error);
-    if (missingOk && (code === "ENOENT" || code === "ENOTDIR")) return null;
-    throw error;
-  }
+async function readEnvFile(path: string): Promise<EnvFile> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const stats = await handle.stat();
     if (!stats.isFile()) {
@@ -146,31 +141,39 @@ export function providerEnvKeys(
   return keys;
 }
 
-/** Settles with `promise`, or rejects on timeout or when `signal` aborts, clearing the timer either way. */
-function withTimeout<T>(promise: Promise<T>, ms: number, signal: AbortSignal): Promise<T> {
+/**
+ * Settles with `promise`, or rejects on timeout or when `signal` aborts, clearing the timer either way. It stops waiting rather than cancel: a libuv thread blocked on a stalled mount can't be interrupted. The timeout error has name `TimeoutError` and code `ETIMEDOUT`, so both log shapes can name it.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const settle = (finish: () => void) => {
       clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onAbort);
       finish();
     };
     const onAbort = () => {
-      const reason: unknown = signal.reason;
+      const reason: unknown = signal?.reason;
       settle(() => reject(reason));
     };
     const timer = setTimeout(
-      () => settle(() => reject(new DOMException("timed out", "TimeoutError"))),
+      () =>
+        settle(() =>
+          reject(
+            Object.assign(new Error("timed out"), { name: "TimeoutError", code: "ETIMEDOUT" }),
+          ),
+        ),
       ms,
     );
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    signal.addEventListener("abort", onAbort, { once: true });
+    // Observe `promise` first, so a rejection after an early abort is never left unhandled.
     promise.then(
       (value) => settle(() => resolve(value)),
       (error: unknown) => settle(() => reject(error)),
     );
+    if (signal?.aborted === true) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -195,6 +198,7 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
   const {
     readSettings,
     configTimeoutMs = 5000,
+    readTimeoutMs = 5000,
     log = (line: string) => console.log(line),
     warn = (line: string) => console.warn(line),
     env = process.env,
@@ -202,6 +206,19 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     platform = process.platform,
   } = options;
   let warnedFor: string | undefined;
+  // A read stuck on a stalled mount holds a libuv thread until it settles, so later session openings share it instead of blocking more threads.
+  const pendingReads = new Map<string, Promise<EnvFile>>();
+
+  function readShared(path: string): Promise<EnvFile> {
+    let read = pendingReads.get(path);
+    if (read === undefined) {
+      read = readEnvFile(path).finally(() => {
+        pendingReads.delete(path);
+      });
+      pendingReads.set(path, read);
+    }
+    return read;
+  }
 
   /** The `envFile` setting, or null after a warning when the settings can't be used. */
   async function readEnvFileSetting(): Promise<{ envFile?: string | undefined } | null> {
@@ -231,14 +248,16 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
       return null;
     }
     const { path, configured } = target;
-    let file: EnvFile | null;
+    let file: EnvFile;
     try {
-      file = await readEnvFile(path, !configured);
+      // No hook signal: Paseo only aborts once it stopped waiting, and the read is bounded anyway.
+      file = await withTimeout(readShared(path), readTimeoutMs);
     } catch (error) {
-      warn(`read failed: ${errorCode(error)}`);
+      const code = errorCode(error);
+      if (!configured && (code === "ENOENT" || code === "ENOTDIR")) return null;
+      warn(`read failed: ${code}`);
       return null;
     }
-    if (file === null) return null;
 
     if (platform !== "win32" && (file.mode & 0o044) !== 0) {
       if (warnedFor !== file.identity) {
