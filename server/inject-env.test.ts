@@ -1,4 +1,6 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,12 +8,21 @@ import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import contribute from "../index.server";
+import { envelopeSettings } from "../shared/settings";
 import {
   createSessionOpenHook,
   envFilePath,
+  resolveEnvFile,
+  type EnvelopeSettingsState,
   type InjectEnvContext,
   type InjectEnvOptions,
 } from "./inject-env";
+
+// Pass-through by default, so a test can make one `open` fail in a way the real filesystem can't.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
 
 const noop = () => {};
 const accepted = () => true;
@@ -82,6 +93,21 @@ function makeContext(providers: unknown = {}, signal = new AbortController().sig
   const get = vi.fn(async () => ({ requestId: "r", config: { providers } as unknown }));
   const context: InjectEnvContext = { paseo: { config: { get } }, signal };
   return { context, get };
+}
+
+function ready(envFile?: string): () => Promise<EnvelopeSettingsState> {
+  const values = envFile === undefined ? {} : { envFile };
+  return async () => ({ status: "ready", revision: "r1", values });
+}
+
+/** Makes `close` reject after closing, as a close error after a successful read would. */
+function failClose(handle: FileHandle): FileHandle {
+  const close = handle.close.bind(handle);
+  handle.close = async () => {
+    await close();
+    throw new Error("close failed");
+  };
+  return handle;
 }
 
 async function run(content: string, providers: unknown = {}, request = makeRequest()) {
@@ -194,6 +220,79 @@ describe("reading the file", () => {
   });
 });
 
+describe("non-regular files", () => {
+  it.skipIf(process.platform === "win32")("does not hang on a FIFO", async () => {
+    await mkdir(join(xdg, "paseo-plugin-envelope"), { recursive: true });
+    execFileSync("mkfifo", [envPath()]);
+    const request = makeRequest();
+    const started = Date.now();
+
+    const result = await makeHook()({ request }, makeContext().context);
+
+    expect(result).toBe(request);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(warnings).toEqual(["read failed: ENOTREG"]);
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a symlink to /dev/null", async () => {
+    await mkdir(join(xdg, "paseo-plugin-envelope"), { recursive: true });
+    await symlink("/dev/null", envPath());
+    const request = makeRequest();
+
+    const result = await makeHook()({ request }, makeContext().context);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["read failed: ENOTREG"]);
+  });
+
+  it.skipIf(process.platform === "win32")("follows a symlink to a regular file", async () => {
+    const target = join(xdg, "target.env");
+    await writeFile(target, "A=1", { mode: 0o600 });
+    await mkdir(join(xdg, "paseo-plugin-envelope"), { recursive: true });
+    await symlink(target, envPath());
+
+    const result = await makeHook()({ request: makeRequest() }, makeContext().context);
+
+    expect(result.env).toEqual({ A: "1" });
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe("filesystem failures", () => {
+  it("logs UNKNOWN when open rejects with a non-object", async () => {
+    vi.mocked(open).mockRejectedValueOnce("boom");
+    const request = makeRequest();
+
+    const result = await makeHook()({ request }, makeContext().context);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["read failed: UNKNOWN"]);
+  });
+
+  it("logs UNKNOWN when the error code is not a string", async () => {
+    vi.mocked(open).mockRejectedValueOnce(Object.assign(new Error("boom"), { code: 42 }));
+    const request = makeRequest();
+
+    const result = await makeHook()({ request }, makeContext().context);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["read failed: UNKNOWN"]);
+  });
+
+  it("still injects when closing the file fails", async () => {
+    await writeEnv("A=1");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(open).mockImplementationOnce(async (...args) =>
+      failClose(await actual.open(...args)),
+    );
+
+    const result = await makeHook()({ request: makeRequest() }, makeContext().context);
+
+    expect(result.env).toEqual({ A: "1" });
+    expect(warnings).toEqual([]);
+  });
+});
+
 describe("permission warning", () => {
   it("warns when the file is readable by group or others, and still injects", async () => {
     await writeEnv("A=1", 0o644);
@@ -208,6 +307,25 @@ describe("permission warning", () => {
     await run("A=1");
 
     expect(warnings).toEqual([]);
+  });
+
+  it("warns once per file state", async () => {
+    const hook = makeHook();
+    const { context } = makeContext();
+    const message = `${envPath()} is readable by group or others, run chmod 600`;
+    await writeEnv("A=1", 0o644);
+
+    await hook({ request: makeRequest() }, context);
+    await hook({ request: makeRequest() }, context);
+    expect(warnings).toEqual([message]);
+
+    await chmod(envPath(), 0o600);
+    await hook({ request: makeRequest() }, context);
+    expect(warnings).toEqual([message]);
+
+    await chmod(envPath(), 0o644);
+    await hook({ request: makeRequest() }, context);
+    expect(warnings).toEqual([message, message]);
   });
 
   it("does not warn on Windows", async () => {
@@ -251,6 +369,207 @@ describe("protected keys", () => {
     expect(result).toBe(request);
     expect(get).not.toHaveBeenCalled();
     expect(lines).toEqual([]);
+  });
+});
+
+describe("logged names", () => {
+  it("names only uppercase env-style keys and counts the others", async () => {
+    const { result } = await run(
+      "API_KEY=1\nhttp_proxy=x\nghp_AbCdEf1234567890=\nAbC123defGHI==\nmy.key=v",
+    );
+
+    expect(Object.keys(result.env)).toEqual([
+      "API_KEY",
+      "http_proxy",
+      "ghp_AbCdEf1234567890",
+      "AbC123defGHI",
+      "my.key",
+    ]);
+    expect(lines).toEqual(["agent-1 (create) API_KEY, 4 other names"]);
+  });
+
+  it("uses the singular for one other name", async () => {
+    await run("A=1\nlower=2");
+
+    expect(lines).toEqual(["agent-1 (create) A, 1 other name"]);
+  });
+
+  it("applies the same rule to skipped protected keys", async () => {
+    await run("PASEO_lower=1");
+
+    expect(lines).toEqual(["agent-1 (create) skipped protected 1 other name"]);
+  });
+});
+
+describe("settings", () => {
+  const custom = () => join(xdg, "custom.env");
+
+  async function runWith(readSettings: InjectEnvOptions["readSettings"], options = {}) {
+    const request = makeRequest();
+    const { context, get } = makeContext();
+    const result = await makeHook({ readSettings, ...options })({ request }, context);
+    return { request, result, get };
+  }
+
+  it("reads the configured absolute path instead of the default", async () => {
+    await writeEnv("DEFAULT=1");
+    await writeFile(custom(), "CUSTOM=1", { mode: 0o600 });
+
+    const { result } = await runWith(ready(custom()));
+
+    expect(result.env).toEqual({ CUSTOM: "1" });
+  });
+
+  it("expands a leading ~/ with the home directory", async () => {
+    await writeFile(custom(), "CUSTOM=1", { mode: 0o600 });
+
+    const { result } = await runWith(ready("~/custom.env"), { homedir: () => xdg });
+
+    expect(result.env).toEqual({ CUSTOM: "1" });
+  });
+
+  it("expands ~ alone to the home directory", async () => {
+    const { result, request } = await runWith(ready("~"), { homedir: () => xdg });
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["read failed: EISDIR"]);
+  });
+
+  it.each(["custom.env", "./custom.env", "~user/custom.env", "~custom.env"])(
+    "rejects the relative path %s without falling back to the default",
+    async (envFile) => {
+      await writeEnv("DEFAULT=1");
+
+      const { result, request, get } = await runWith(ready(envFile), { homedir: () => xdg });
+
+      expect(result).toBe(request);
+      expect(get).not.toHaveBeenCalled();
+      expect(warnings).toEqual(["envFile setting is not an absolute path"]);
+    },
+  );
+
+  it.each([
+    ["an empty envFile", ""],
+    ["no envFile", undefined],
+  ])("uses the default path for %s", async (_label, envFile) => {
+    await writeEnv("DEFAULT=1");
+
+    const { result } = await runWith(ready(envFile));
+
+    expect(result.env).toEqual({ DEFAULT: "1" });
+  });
+
+  it("warns when the configured file is missing", async () => {
+    const { result, request } = await runWith(ready(custom()));
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["read failed: ENOENT"]);
+  });
+
+  it("warns when a parent of the configured file is not a directory", async () => {
+    await writeFile(custom(), "", { mode: 0o600 });
+
+    await runWith(ready(join(custom(), ".env")));
+
+    expect(warnings).toEqual(["read failed: ENOTDIR"]);
+  });
+
+  it("stays silent when the default file is missing", async () => {
+    const { result, request } = await runWith(ready());
+
+    expect(result).toBe(request);
+    expect([...lines, ...warnings]).toEqual([]);
+  });
+
+  it("names the configured path in the permission warning", async () => {
+    await writeFile(custom(), "A=1", { mode: 0o644 });
+
+    await runWith(ready(custom()));
+
+    expect(warnings).toEqual([`${custom()} is readable by group or others, run chmod 600`]);
+  });
+
+  it("injects nothing and does not log the error when the settings are invalid", async () => {
+    await writeEnv("DEFAULT=1");
+    const readSettings = async (): Promise<EnvelopeSettingsState> => ({
+      status: "invalid",
+      revision: "r1",
+      error: "envFile: expected string, received s3cr3t",
+    });
+
+    const { result, request, get } = await runWith(readSettings);
+
+    expect(result).toBe(request);
+    expect(get).not.toHaveBeenCalled();
+    expect(warnings).toEqual(["settings invalid"]);
+  });
+
+  it("injects nothing and logs the error name when reading the settings rejects", async () => {
+    await writeEnv("DEFAULT=1");
+
+    const { result, request } = await runWith(async () => {
+      throw new RangeError("s3cr3t");
+    });
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["settings read failed: RangeError"]);
+  });
+
+  it("treats a synchronous throw from the reader like a rejection", async () => {
+    await writeEnv("DEFAULT=1");
+    const readSettings = (): Promise<EnvelopeSettingsState> => {
+      throw new SyntaxError("s3cr3t");
+    };
+
+    const { result, request } = await runWith(readSettings);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["settings read failed: SyntaxError"]);
+  });
+
+  it("returns the request unchanged when the reader resolves a malformed state", async () => {
+    await writeEnv("DEFAULT=1");
+    const readSettings = async () => null as unknown as EnvelopeSettingsState;
+
+    const { result, request } = await runWith(readSettings);
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["unexpected error: TypeError"]);
+  });
+
+  it("re-reads the settings on every call", async () => {
+    await writeEnv("DEFAULT=1");
+    await writeFile(custom(), "CUSTOM=1", { mode: 0o600 });
+    const readSettings = vi
+      .fn<() => Promise<EnvelopeSettingsState>>()
+      .mockImplementationOnce(ready())
+      .mockImplementationOnce(ready(custom()));
+    const hook = makeHook({ readSettings });
+    const { context } = makeContext();
+
+    const first = await hook({ request: makeRequest() }, context);
+    const second = await hook({ request: makeRequest() }, context);
+
+    expect(first.env).toEqual({ DEFAULT: "1" });
+    expect(second.env).toEqual({ CUSTOM: "1" });
+  });
+
+  it("resolves paths without touching the filesystem", () => {
+    const home = () => "/home/me";
+
+    expect(resolveEnvFile("/etc/a.env", {}, home)).toEqual({
+      path: "/etc/a.env",
+      configured: true,
+    });
+    expect(resolveEnvFile("~/a.env", {}, home)).toEqual({
+      path: "/home/me/a.env",
+      configured: true,
+    });
+    expect(resolveEnvFile(undefined, { XDG_CONFIG_HOME: "/xdg" }, home)).toEqual({
+      path: "/xdg/paseo-plugin-envelope/.env",
+      configured: false,
+    });
+    expect(resolveEnvFile("a.env", {}, home)).toBeNull();
   });
 });
 
@@ -335,7 +654,13 @@ describe("precedence", () => {
   });
 
   it("injects everything when config has no providers", async () => {
-    const { result } = await run("A=f", undefined);
+    await writeEnv("A=f");
+    const get = async () => ({ config: {} });
+
+    const result = await makeHook()(
+      { request: makeRequest() },
+      { paseo: { config: { get } }, signal: new AbortController().signal },
+    );
 
     expect(result.env).toEqual({ A: "f" });
   });
@@ -406,17 +731,57 @@ describe("config.get failures", () => {
     expect(warnings).toEqual(["config read failed: TimeoutError"]);
   });
 
-  it("uses a 5 s timeout by default and clears it on success", async () => {
+  it("times out after 5 s by default", async () => {
     await writeEnv("A=1");
-    const setSpy = vi.spyOn(globalThis, "setTimeout");
-    const clearSpy = vi.spyOn(globalThis, "clearTimeout");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const request = makeRequest();
+    let called: () => void = noop;
+    const getCalled = new Promise<void>((resolve) => {
+      called = resolve;
+    });
+    const get = () => {
+      called();
+      return new Promise<never>(noop);
+    };
+    let settled = false;
 
-    await makeHook()({ request: makeRequest() }, makeContext().context);
+    const pending = makeHook()(
+      { request },
+      { paseo: { config: { get } }, signal: new AbortController().signal },
+    ).finally(() => {
+      settled = true;
+    });
+    await getCalled;
+    await vi.advanceTimersByTimeAsync(4999);
 
-    const call = setSpy.mock.calls.find(([, ms]) => ms === 5000);
-    expect(call).toBeDefined();
-    const timer = setSpy.mock.results[setSpy.mock.calls.indexOf(call!)]?.value;
-    expect(clearSpy).toHaveBeenCalledWith(timer);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toBe(request);
+    expect(warnings).toEqual(["config read failed: TimeoutError"]);
+  });
+
+  it("clears the timer on success", async () => {
+    await writeEnv("A=1");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    const result = await makeHook()({ request: makeRequest() }, makeContext().context);
+
+    expect(result.env).toEqual({ A: "1" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("logs UnknownError when config.get rejects with a non-error", async () => {
+    await writeEnv("A=1");
+    const request = makeRequest();
+    const get = () => Promise.reject(Object.assign(Object.create(null), { name: "Fake" }));
+
+    const result = await makeHook()(
+      { request },
+      { paseo: { config: { get } }, signal: new AbortController().signal },
+    );
+
+    expect(result).toBe(request);
+    expect(warnings).toEqual(["config read failed: UnknownError"]);
   });
 
   it("stops when the hook signal aborts", async () => {
@@ -518,15 +883,37 @@ describe("result", () => {
 });
 
 describe("registration", () => {
-  it("registers the session_open hook and returns its remover", async () => {
+  it("registers the settings document and a hook that reads them", async () => {
+    spyOnOutput();
+    const custom = join(xdg, "custom.env");
+    await writeFile(custom, "A=1", { mode: 0o600 });
     const remove = vi.fn();
-    const before = vi.fn(() => remove);
-    const server = { before } as unknown as Parameters<typeof contribute>[0];
+    const before = vi.fn(
+      (_event: string, _hook: ReturnType<typeof createSessionOpenHook>) => remove,
+    );
+    const read = vi.fn(ready(custom));
+    const registerSettings = vi.fn(() => ({ read, subscribe: () => noop }));
+    const server = { before, registerSettings } as unknown as Parameters<typeof contribute>[0];
 
     const cleanup = contribute(server);
 
+    expect(registerSettings).toHaveBeenCalledWith(envelopeSettings);
     expect(before).toHaveBeenCalledWith("agent.session_open", expect.any(Function));
     expect(cleanup).toBe(remove);
+    const hook = before.mock.calls[0]?.[1];
+    if (hook === undefined) throw new Error("no hook registered");
+    const result = await hook({ request: makeRequest() }, makeContext().context);
+    expect(read).toHaveBeenCalledOnce();
+    expect(result.env).toEqual({ A: "1" });
+  });
+
+  it("defines a host settings document with an optional envFile", () => {
+    expect(envelopeSettings).toMatchObject({ id: "settings", scope: "host", version: 1 });
+    expect(envelopeSettings.schema.parse({})).toEqual({});
+    expect(envelopeSettings.schema.parse({ envFile: "~/a.env", other: 1 })).toEqual({
+      envFile: "~/a.env",
+    });
+    expect(envelopeSettings.schema.safeParse({ envFile: 1 }).success).toBe(false);
   });
 });
 
@@ -546,7 +933,11 @@ describe("secrecy", () => {
       `PASEO_TOKEN=${sentinels.protectedPaseo}`,
       `REQ=${sentinels.shadowedRequest}`,
       `PROV=${sentinels.shadowedProvider}`,
+      // A pasted token parses as a key, so key names count as secrets unless they look like env names.
+      "ghp_s3cr3tTOKEN=",
+      "PASEO_s3cr3tlower=x",
     ].join("\n");
+    const secretKeys = ["ghp_s3cr3tTOKEN", "PASEO_s3cr3tlower"];
     // Group-readable so the permission warning fires too.
     await writeEnv(content, 0o644);
     const hook = createSessionOpenHook({ env: { XDG_CONFIG_HOME: xdg } });
@@ -604,6 +995,22 @@ describe("secrecy", () => {
         ok,
       ),
     );
+    const settingsCases: (() => Promise<EnvelopeSettingsState>)[] = [
+      async () => ({ status: "invalid", revision: "r", error: `bad ${sentinels.injected}` }),
+      async () => {
+        throw new Error(`settings ${sentinels.injected}`);
+      },
+      ready(`relative-${sentinels.injected}`),
+      ready(join(xdg, `missing-${sentinels.injected}`)),
+    ];
+    for (const readSettings of settingsCases) {
+      results.push(
+        await createSessionOpenHook({ env: { XDG_CONFIG_HOME: xdg }, readSettings })(
+          { request },
+          ok,
+        ),
+      );
+    }
 
     // Wait a tick so deferred output (microtasks, timers) would be caught too.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -615,10 +1022,18 @@ describe("secrecy", () => {
     expect(output).toContain("INJECTED");
     expect(output).toContain("config read failed: ConfigError");
     expect(output).toContain("read failed: EISDIR");
-    for (const sentinel of Object.values(sentinels)) {
+    expect(output).toContain("settings invalid");
+    expect(output).toContain("settings read failed: Error");
+    expect(output).toContain("envFile setting is not an absolute path");
+    expect(output).toContain("read failed: ENOENT");
+    for (const sentinel of [...Object.values(sentinels), ...secretKeys]) {
       expect(output).not.toContain(sentinel);
     }
-    expect(results[0]?.env).toEqual({ REQ: "r", INJECTED: sentinels.injected });
+    expect(results[0]?.env).toEqual({
+      REQ: "r",
+      INJECTED: sentinels.injected,
+      ghp_s3cr3tTOKEN: "",
+    });
     for (const result of results.slice(1)) {
       expect(result).toBe(request);
     }

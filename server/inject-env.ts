@@ -3,8 +3,13 @@ import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
-import type { PluginHookContext, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+import type {
+  PluginHookContext,
+  PluginSessionOpenRequest,
+  PluginSettingsState,
+} from "@getpaseo/plugin/server";
 
+import type { envelopeSettings } from "../shared/settings";
 import { parseEnvFile } from "./env-file";
 
 // Paseo 0.11.1 ignores `extends` on these ids (BUILTIN_PROVIDER_IDS in provider-registry.js).
@@ -13,7 +18,11 @@ const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
 // A pasted token or base64 line ending in `=` parses as a key, so logs only name keys in the usual uppercase form and count the rest.
 const LOGGABLE_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
+export type EnvelopeSettingsState = PluginSettingsState<typeof envelopeSettings.schema>;
+
 export interface InjectEnvOptions {
+  /** Reads the plugin settings on every session open. Absent means no settings: the default path applies. */
+  readSettings?: () => Promise<EnvelopeSettingsState>;
   configTimeoutMs?: number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
@@ -59,6 +68,18 @@ export function envFilePath(env: NodeJS.ProcessEnv, home: () => string): string 
   return join(base, "paseo-plugin-envelope", ".env");
 }
 
+/** Where to read the `.env`: the `envFile` setting when set, with a leading `~` expanded, else the XDG default. Null when the setting is not an absolute path. */
+export function resolveEnvFile(
+  envFile: string | undefined,
+  env: NodeJS.ProcessEnv,
+  home: () => string,
+): { path: string; configured: boolean } | null {
+  if (!envFile) return { path: envFilePath(env, home), configured: false };
+  const path =
+    envFile === "~" || envFile.startsWith("~/") ? join(home(), envFile.slice(1)) : envFile;
+  return isAbsolute(path) ? { path, configured: true } : null;
+}
+
 interface EnvFile {
   content: string;
   mode: number;
@@ -67,15 +88,15 @@ interface EnvFile {
 }
 
 /**
- * Reads the file once through one handle. Returns null when it doesn't exist; throws with the original error otherwise, or with `EISDIR` or `ENOTREG` when it isn't a regular file. `O_NONBLOCK` keeps a FIFO with no writer from hanging the open.
+ * Reads the file once through one handle. Returns null when it doesn't exist and `missingOk` is set; throws with the original error otherwise, or with `EISDIR` or `ENOTREG` when it isn't a regular file. `O_NONBLOCK` keeps a FIFO with no writer from hanging the open.
  */
-async function readEnvFile(path: string): Promise<EnvFile | null> {
+async function readEnvFile(path: string, missingOk: boolean): Promise<EnvFile | null> {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch (error) {
     const code = errorCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    if (missingOk && (code === "ENOENT" || code === "ENOTDIR")) return null;
     throw error;
   }
   try {
@@ -138,10 +159,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number, signal: AbortSignal): P
 }
 
 /**
- * Builds the `agent.session_open` before-hook that injects the global `.env`. It only ever logs key names, file paths, error codes and error names, never a value, and it never throws: on any failure it returns the request unchanged.
+ * Builds the `agent.session_open` before-hook that injects the `.env` chosen by the settings, or the global default. It only ever logs key names, file paths, error codes and error names, never a value, and it never throws: on any failure it returns the request unchanged.
  */
 export function createSessionOpenHook(options: InjectEnvOptions = {}) {
   const {
+    readSettings,
     configTimeoutMs = 5000,
     log = (line: string) => console.log(line),
     warn = (line: string) => console.warn(line),
@@ -151,19 +173,42 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
   } = options;
   let warnedFor: string | undefined;
 
-  async function inject(
-    request: PluginSessionOpenRequest,
-    { paseo, signal }: InjectEnvContext,
-  ): Promise<PluginSessionOpenRequest> {
-    const path = envFilePath(env, home);
+  /** The `envFile` setting, or null after a warning when the settings can't be used. */
+  async function readEnvFileSetting(): Promise<{ envFile?: string } | null> {
+    if (readSettings === undefined) return {};
+    let state: EnvelopeSettingsState;
+    try {
+      state = await Promise.resolve().then(readSettings);
+    } catch (error) {
+      warn(`settings read failed: ${errorName(error)}`);
+      return null;
+    }
+    // The invalid state's `error` can quote stored values, so it is not logged.
+    if (state.status === "invalid") {
+      warn("settings invalid");
+      return null;
+    }
+    return state.values;
+  }
+
+  /** The `.env` content, or null when there is nothing to inject. */
+  async function loadEnvFile(): Promise<string | null> {
+    const setting = await readEnvFileSetting();
+    if (setting === null) return null;
+    const target = resolveEnvFile(setting.envFile, env, home);
+    if (target === null) {
+      warn("envFile setting is not an absolute path");
+      return null;
+    }
+    const { path, configured } = target;
     let file: EnvFile | null;
     try {
-      file = await readEnvFile(path);
+      file = await readEnvFile(path, !configured);
     } catch (error) {
       warn(`read failed: ${errorCode(error)}`);
-      return request;
+      return null;
     }
-    if (file === null) return request;
+    if (file === null) return null;
 
     if (platform !== "win32" && (file.mode & 0o044) !== 0) {
       if (warnedFor !== file.identity) {
@@ -173,9 +218,18 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     } else {
       warnedFor = undefined;
     }
+    return file.content;
+  }
+
+  async function inject(
+    request: PluginSessionOpenRequest,
+    { paseo, signal }: InjectEnvContext,
+  ): Promise<PluginSessionOpenRequest> {
+    const content = await loadEnvFile();
+    if (content === null) return request;
 
     const prefix = `${request.agentId} (${request.reason})`;
-    const parsed = Object.entries(parseEnvFile(file.content));
+    const parsed = Object.entries(parseEnvFile(content));
     const skipped = parsed.filter(([key]) => isProtected(key)).map(([key]) => key);
     if (skipped.length > 0) log(`${prefix} skipped protected ${describeNames(skipped)}`);
 
