@@ -14,8 +14,8 @@ import { parseEnvFile } from "./env-file";
 
 const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
 // Values must never reach logs, even through a crafted error, so only identifier-shaped names and codes are logged.
-const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
-const ERROR_CODE = /^E[A-Z0-9]{1,31}$/;
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/u;
+const ERROR_CODE = /^E[A-Z0-9]{1,31}$/u;
 
 export type EnvelopeSettingsState = PluginSettingsState<typeof envelopeSettings.schema>;
 
@@ -69,8 +69,8 @@ function isProtected(key: string): boolean {
 
 /** `<XDG_CONFIG_HOME>/paseo-plugin-envelope/.env`, ignoring an empty or relative `XDG_CONFIG_HOME` as the XDG spec requires. */
 export function envFilePath(env: NodeJS.ProcessEnv, home: () => string): string {
-  const xdg = env.XDG_CONFIG_HOME;
-  const base = xdg && isAbsolute(xdg) ? xdg : join(home(), ".config");
+  const xdg = env["XDG_CONFIG_HOME"];
+  const base = xdg !== undefined && isAbsolute(xdg) ? xdg : join(home(), ".config");
   return join(base, "paseo-plugin-envelope", ".env");
 }
 
@@ -80,7 +80,9 @@ export function resolveEnvFile(
   env: NodeJS.ProcessEnv,
   home: () => string,
 ): { path: string; configured: boolean } | null {
-  if (!envFile) return { path: envFilePath(env, home), configured: false };
+  if (envFile === undefined || envFile === "") {
+    return { path: envFilePath(env, home), configured: false };
+  }
   const path =
     envFile === "~" || envFile.startsWith("~/") ? join(home(), envFile.slice(1)) : envFile;
   return isAbsolute(path) ? { path, configured: true } : null;
@@ -135,10 +137,10 @@ export function providerEnvKeys(
     visited.add(id);
     const entry: unknown = providers[id];
     if (!isRecord(entry)) break;
-    if (isRecord(entry.env)) {
-      for (const key of Object.keys(entry.env)) keys.add(key);
+    if (isRecord(entry["env"])) {
+      for (const key of Object.keys(entry["env"])) keys.add(key);
     }
-    const base: unknown = entry.extends;
+    const base = entry["extends"];
     id = !builtins.has(id) && typeof base === "string" && base !== "acp" ? base : undefined;
   }
   return keys;
@@ -152,7 +154,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, signal: AbortSignal): P
       signal.removeEventListener("abort", onAbort);
       finish();
     };
-    const onAbort = () => settle(() => reject(signal.reason));
+    const onAbort = () => {
+      const reason: unknown = signal.reason;
+      settle(() => reject(reason));
+    };
     const timer = setTimeout(
       () => settle(() => reject(new DOMException("timed out", "TimeoutError"))),
       ms,
@@ -171,14 +176,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number, signal: AbortSignal): P
 
 /** The provider ids the snapshot marks built-in. Throws a TypeError when the snapshot is malformed. */
 export function builtinProviders(snapshot: unknown): Set<string> {
-  const entries = isRecord(snapshot) ? snapshot.entries : undefined;
+  const entries = isRecord(snapshot) ? snapshot["entries"] : undefined;
   if (!Array.isArray(entries)) throw new TypeError("snapshot has no entries");
   const builtins = new Set<string>();
   for (const entry of entries as unknown[]) {
-    if (!isRecord(entry) || typeof entry.provider !== "string") {
+    if (!isRecord(entry) || typeof entry["provider"] !== "string") {
       throw new TypeError("malformed snapshot entry");
     }
-    if (entry.source === "builtin") builtins.add(entry.provider);
+    if (entry["source"] === "builtin") builtins.add(entry["provider"]);
   }
   return builtins;
 }
@@ -199,7 +204,7 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
   let warnedFor: string | undefined;
 
   /** The `envFile` setting, or null after a warning when the settings can't be used. */
-  async function readEnvFileSetting(): Promise<{ envFile?: string } | null> {
+  async function readEnvFileSetting(): Promise<{ envFile?: string | undefined } | null> {
     if (readSettings === undefined) return {};
     let state: EnvelopeSettingsState;
     try {
@@ -299,7 +304,7 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
       builtins = new Set();
     }
 
-    const providerKeys = providerEnvKeys(config.providers, request.provider, builtins);
+    const providerKeys = providerEnvKeys(config["providers"], request.provider, builtins);
     const injected = candidates.filter(([key]) => !providerKeys.has(key));
     summarize(injected.length);
     if (injected.length === 0) return request;

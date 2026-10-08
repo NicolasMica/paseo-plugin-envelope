@@ -12,11 +12,12 @@
     "client/",
     "server/",
     "shared/",
-    "!**/*.test.ts"
+    "!**/*.test.ts",
+    "!**/*.test.tsx"
   ],
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --build",
     "format": "oxfmt .",
     "format:files": "oxfmt",
     "format:check": "oxfmt --check .",
@@ -24,7 +25,7 @@
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "prepare": "lefthook install",
-    "test": "vitest run"
+    "test": "vitest run --coverage"
   },
   "dependencies": {
     "dotenv": "^18.0.5"
@@ -34,9 +35,11 @@
     "@tanstack/react-query": "^5.90.11",
     "@types/node": "^24.0.0",
     "@types/react": "~19.2.0",
+    "@vitest/coverage-v8": "^5.0.3",
     "lefthook": "^2.2.1",
     "oxfmt": "^0.72.0",
     "oxlint": "^1.87.0",
+    "oxlint-tsgolint": "^7.0.2003",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.9.3",

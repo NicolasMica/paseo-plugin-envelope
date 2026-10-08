@@ -2,12 +2,10 @@ pre-commit:
   parallel: true
   jobs:
     - name: format
-      glob: "*.{css,js,json,jsonc,jsx,md,ts,tsx,yaml,yml}"
-      exclude:
-        - "package-lock.json"
-      run: npm run format:check:files -- {staged_files}
+      run: npm run format:check
     - name: lint
-      glob: "*.{js,jsx,ts,tsx}"
-      run: npm run lint -- {staged_files}
+      run: npm run lint
     - name: typecheck
       run: npm run typecheck
+    - name: test
+      run: npm test

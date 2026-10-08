@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 
 import contribute from "../index.server";
 import { envelopeSettings } from "../shared/settings";
@@ -23,16 +23,23 @@ import {
 // Pass-through by default, so a test can make one `open` fail in a way the real filesystem can't.
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, open: vi.fn(actual.open) };
+  return { ...actual, open: vi.fn<typeof actual.open>(actual.open) };
 });
 
 const noop = () => {};
 const accepted = () => true;
 
+/** Types a deliberately malformed value or a partial fake as `T`, so a test can reach the runtime guards the types otherwise rule out. */
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- a return-only `T` is how the caller picks the type to fake
+function malformed<T>(value: unknown): T {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the whole point is to hand the code a value its types forbid
+  return value as T;
+}
+
 function spyOnOutput() {
   const consoleSpies = Object.keys(console)
-    .filter((name) => typeof console[name as keyof Console] === "function")
-    .map((name) => vi.spyOn(console, name as keyof Console).mockImplementation(noop));
+    .filter((name): name is keyof Console => typeof Reflect.get(console, name) === "function")
+    .map((name) => vi.spyOn(console, name).mockImplementation(noop));
   return [
     ...consoleSpies,
     vi.spyOn(process, "emitWarning").mockImplementation(noop),
@@ -71,8 +78,12 @@ async function writeEnv(content: string, mode = 0o600) {
 function makeHook(options: InjectEnvOptions = {}) {
   return createSessionOpenHook({
     env: { XDG_CONFIG_HOME: xdg },
-    log: (line) => lines.push(line),
-    warn: (line) => warnings.push(line),
+    log: (line) => {
+      lines.push(line);
+    },
+    warn: (line) => {
+      warnings.push(line);
+    },
     platform: "darwin",
     ...options,
   });
@@ -111,7 +122,10 @@ function contextWith(
 }
 
 function makeContext(providers: unknown = {}, signal = new AbortController().signal) {
-  const get = vi.fn(async () => ({ requestId: "r", config: { providers } as unknown }));
+  const get = vi.fn<() => Promise<{ requestId: string; config: unknown }>>(async () => ({
+    requestId: "r",
+    config: { providers },
+  }));
   return { context: contextWith(get, signal), get };
 }
 
@@ -167,7 +181,7 @@ describe("path resolution", () => {
     await writeEnv("A=1");
 
     const before = await hook({ request: makeRequest() }, context);
-    env.XDG_CONFIG_HOME = xdg;
+    env["XDG_CONFIG_HOME"] = xdg;
     const after = await hook({ request: makeRequest() }, context);
 
     expect(before.env).toEqual({});
@@ -427,7 +441,10 @@ describe("logged counts", () => {
 describe("settings", () => {
   const custom = () => join(xdg, "custom.env");
 
-  async function runWith(readSettings: InjectEnvOptions["readSettings"], options = {}) {
+  async function runWith(
+    readSettings: NonNullable<InjectEnvOptions["readSettings"]>,
+    options = {},
+  ) {
     const request = makeRequest();
     const { context, get } = makeContext();
     const result = await makeHook({ readSettings, ...options })({ request }, context);
@@ -552,7 +569,7 @@ describe("settings", () => {
 
   it("returns the request unchanged when the reader resolves a malformed state", async () => {
     await writeEnv("DEFAULT=1");
-    const readSettings = async () => null as unknown as EnvelopeSettingsState;
+    const readSettings = async () => malformed<EnvelopeSettingsState>(null);
 
     const { result, request } = await runWith(readSettings);
 
@@ -711,7 +728,7 @@ describe("config.get failures", () => {
   it("injects nothing and logs the error name when config.get rejects", async () => {
     await writeEnv("A=1");
     const request = makeRequest();
-    const get = vi.fn(async () => {
+    const get = vi.fn<Get>(async () => {
       throw new RangeError("boom");
     });
 
@@ -790,7 +807,8 @@ describe("config.get failures", () => {
   it("logs UnknownError when config.get rejects with a non-error", async () => {
     await writeEnv("A=1");
     const request = makeRequest();
-    const get = () => Promise.reject(Object.assign(Object.create(null), { name: "Fake" }));
+    const notAnError: unknown = Object.assign(Object.create(null), { name: "Fake" });
+    const get = () => Promise.reject(notAnError);
 
     const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
@@ -814,7 +832,7 @@ describe("config.get failures", () => {
   it("stops when the hook signal is already aborted", async () => {
     await writeEnv("A=1");
     const request = makeRequest();
-    const get = vi.fn(() => new Promise<never>(noop));
+    const get = vi.fn<Get>(() => new Promise<never>(noop));
 
     const result = await makeHook()({ request }, contextWith(get, AbortSignal.abort()));
 
@@ -838,7 +856,7 @@ describe("unexpected errors", () => {
   it("returns the request unchanged when the response itself is malformed", async () => {
     await writeEnv("A=1");
     const request = makeRequest();
-    const get = async () => null as unknown as { config: unknown };
+    const get = async () => malformed<{ config: unknown }>(null);
 
     const result = await makeHook()({ request }, contextWith(get, new AbortController().signal));
 
@@ -887,13 +905,15 @@ describe("registration", () => {
     spyOnOutput();
     const custom = join(xdg, "custom.env");
     await writeFile(custom, "A=1", { mode: 0o600 });
-    const remove = vi.fn();
-    const before = vi.fn(
-      (_event: string, _hook: ReturnType<typeof createSessionOpenHook>) => remove,
+    const remove = vi.fn<() => void>();
+    const before =
+      vi.fn<(event: string, hook: ReturnType<typeof createSessionOpenHook>) => typeof remove>();
+    before.mockReturnValue(remove);
+    const read = vi.fn<() => Promise<EnvelopeSettingsState>>(ready(custom));
+    const registerSettings = vi.fn<() => { read: typeof read; subscribe: () => typeof noop }>(
+      () => ({ read, subscribe: () => noop }),
     );
-    const read = vi.fn(ready(custom));
-    const registerSettings = vi.fn(() => ({ read, subscribe: () => noop }));
-    const server = { before, registerSettings } as unknown as Parameters<typeof contribute>[0];
+    const server = malformed<Parameters<typeof contribute>[0]>({ before, registerSettings });
 
     const cleanup = contribute(server);
 
@@ -901,7 +921,7 @@ describe("registration", () => {
     expect(before).toHaveBeenCalledWith("agent.session_open", expect.any(Function));
     expect(cleanup).toBe(remove);
     const hook = before.mock.calls[0]?.[1];
-    if (hook === undefined) throw new Error("no hook registered");
+    assert.isDefined(hook, "no hook registered");
     const result = await hook({ request: makeRequest() }, makeContext().context);
     expect(read).toHaveBeenCalledOnce();
     expect(result.env).toEqual({ A: "1" });
@@ -966,7 +986,7 @@ describe("provider snapshot", () => {
       async () => ({ entries: [{ source: "builtin" }] }),
       "TypeError",
     ],
-    ["is not an object", async () => null as unknown as { entries: unknown }, "TypeError"],
+    ["is not an object", async () => malformed<{ entries: unknown }>(null), "TypeError"],
   ])(
     "warns and treats no provider as built-in when the snapshot %s",
     async (_label, snapshot, name) => {
@@ -980,7 +1000,7 @@ describe("provider snapshot", () => {
 
   it("only warns about config when both calls fail, leaving no rejection unhandled", async () => {
     await writeEnv("A=f");
-    const unhandled = vi.fn();
+    const unhandled = vi.fn<(reason: unknown) => void>();
     process.on("unhandledRejection", unhandled);
     const request = makeRequest();
     const get = async () => {
@@ -991,7 +1011,9 @@ describe("provider snapshot", () => {
     };
 
     const result = await makeHook()({ request }, contextWith(get, undefined, snapshot));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
     process.off("unhandledRejection", unhandled);
 
     expect(result).toBe(request);
@@ -1025,8 +1047,8 @@ describe("provider snapshot", () => {
 
   it("does not call the snapshot when no candidate remains", async () => {
     await writeEnv("PATH=1");
-    const get = vi.fn(async () => ({ config: {} }));
-    const snapshot = vi.fn(async () => BUILTIN_SNAPSHOT);
+    const get = vi.fn<Get>(async () => ({ config: {} }));
+    const snapshot = vi.fn<Snapshot>(async () => BUILTIN_SNAPSHOT);
 
     await makeHook()({ request: makeRequest() }, contextWith(get, undefined, snapshot));
 
@@ -1233,7 +1255,9 @@ describe("secrecy", () => {
     results.push(await hook({ request }, ok));
 
     // Wait a tick so deferred output (microtasks, timers) would be caught too.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
     const output = spies
       .flatMap((spy) => spy.mock.calls)
       .flat()
