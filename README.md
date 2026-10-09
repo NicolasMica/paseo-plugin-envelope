@@ -95,7 +95,7 @@ An agent that is already running keeps the environment it started with. After yo
 paseo agent reload <agent-id>
 ```
 
-This restarts the agent's process and interrupts its current turn if it has one.
+This restarts the agent's process and interrupts its current turn if it has one. An archived agent gets the current file when Paseo loads it again, for example when you send it a message.
 
 ## Precedence
 
@@ -132,11 +132,46 @@ How each provider applies it:
 
 This is guidance, not a guarantee: an agent can still print or send a value. Only put in the `.env` what every agent may see.
 
+## Shell commands and MCP servers
+
+Checked with Claude Code 2.1.289 and Codex CLI 0.156.1 on Paseo 0.11.1. Provider updates can change this.
+
+### Shell commands
+
+Claude Code and Codex agents both see the variables in their shell commands, including secret-looking names (tested with a `_TOKEN` name).
+
+Codex filters the environment of its shell commands with `shell_environment_policy` in its config, but its shell snapshot changes what that filter does:
+
+- **Shell snapshot on (the default):** every injected variable reaches the shell, whatever `shell_environment_policy` says. Codex snapshots the login shell's environment when the session starts and sources it before each command, so neither `ignore_default_excludes = false` nor an `exclude` pattern removed the variable.
+- **`[features] shell_snapshot = false`:** the policy applies. `ignore_default_excludes` defaults to `true`, so the `_TOKEN` name still reached the shell. Set to `false`, Codex drops names matching its default excludes (names containing `KEY`, `SECRET` or `TOKEN`); keep it unset or `true`.
+
+These settings were tested in a project-level `.codex/config.toml`, which Codex layers over `~/.codex/config.toml`.
+
+### MCP servers
+
+Envelope doesn't configure MCP servers. A stdio MCP server that the agent's provider starts:
+
+| Provider    | Does the server see the variables?                                       |
+| ----------- | ------------------------------------------------------------------------ |
+| Claude Code | Yes, it inherits the agent's environment.                                |
+| Codex       | No. List the names to pass in the server's `env_vars` in Codex's config. |
+
+Codex starts stdio MCP servers with a minimal environment, plus the server's `env` and the variables named in `env_vars`:
+
+```toml
+[mcp_servers.example]
+command = "example-mcp"
+env_vars = ["EXAMPLE_API_TOKEN"]
+```
+
+An HTTP MCP server isn't started by the agent, so it doesn't inherit the agent's environment. A value reaches it only if its config passes one, for example in a header (not tested).
+
 ## Security
 
 - **Every agent sees every variable.** There is no per-project, per-provider or per-agent scope. An agent can print a value in its transcript, in command output, or pass it to a tool. Providers keep transcripts on disk, so a printed value stays there after the session ends. The [secrets guideline](#secrets-guideline) asks new agents not to print values, but it can't enforce it, and agents created before Envelope, or on ACP providers, don't get it.
 - **Values stay in plain text** in the `.env`. Keep it at `chmod 600` in a `chmod 700` directory. On macOS and Linux, Envelope logs a warning when the file is readable by group or others, once until the file or its mode changes.
 - **Envelope logs counts, not names.** Its output contains agent ids, session reasons, counts, the file path, error codes and error names, never a variable name or a value. A malformed line can turn part of a value into a key, so even names could leak a value.
+- **Codex writes the environment to disk.** Codex keeps a snapshot of its shell environment, values included, in `~/.codex/shell_snapshots/<thread-id>.<timestamp>.sh`, readable by group and others (`644` in a `755` directory in our test). It deleted the file when we archived the agent, but an older snapshot with no live Paseo agent was still in the directory, so check it from time to time. This applies to every variable in the agent's environment, not only Envelope's. Turn it off with `[features] shell_snapshot = false` in `~/.codex/config.toml`.
 - **Don't run the daemon at the `trace` log level while agents handle secrets.** At `trace`, Paseo logs raw provider events, including tool output, so a value an agent prints lands in `daemon.log`. The default `info` level doesn't log the injected environment.
 - **Only regular files are read.** A FIFO, a socket or a directory at the file's path is refused with a warning, so it can't hang the session opening.
 - **On OpenCode,** any injected variable makes Paseo start a dedicated OpenCode server for the session instead of the shared one.
