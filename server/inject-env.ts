@@ -1,9 +1,8 @@
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import type {
+  PluginBeforeRequests,
   PluginHookContext,
   PluginSessionOpenRequest,
   PluginSettingsState,
@@ -12,6 +11,8 @@ import type {
 import type { envelopeSettings } from "../shared/settings";
 import { parseEnvFile } from "./env-file";
 import { errorCode, errorName, isRecord, withTimeout } from "./errors";
+import { SECRETS_GUIDELINE, hasSecretsGuideline } from "./guideline";
+import { readEnvFile, type EnvFile } from "./read-file";
 
 const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
 
@@ -39,6 +40,8 @@ export interface InjectEnvContext {
   signal: PluginHookContext["signal"];
 }
 
+const noop = () => {};
+
 function isProtected(key: string): boolean {
   return PROTECTED_KEYS.has(key) || key.startsWith("PASEO_");
 }
@@ -62,32 +65,6 @@ export function resolveEnvFile(
   const path =
     envFile === "~" || envFile.startsWith("~/") ? join(home(), envFile.slice(1)) : envFile;
   return isAbsolute(path) ? { path, configured: true } : null;
-}
-
-interface EnvFile {
-  content: string;
-  mode: number;
-  /** Device, inode and mode, to warn about permissions once per file state. */
-  identity: string;
-}
-
-/**
- * Reads the file once through one handle. Throws with the original error, or with `EISDIR` or `ENOTREG` when it isn't a regular file. `O_NONBLOCK` keeps a FIFO with no writer from hanging the open.
- */
-async function readEnvFile(path: string): Promise<EnvFile> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-  try {
-    const stats = await handle.stat();
-    if (!stats.isFile()) {
-      throw Object.assign(new Error("not a regular file"), {
-        code: stats.isDirectory() ? "EISDIR" : "ENOTREG",
-      });
-    }
-    const content = await handle.readFile("utf8");
-    return { content, mode: stats.mode, identity: `${stats.dev}:${stats.ino}:${stats.mode}` };
-  } finally {
-    await handle.close().catch(() => {});
-  }
 }
 
 /**
@@ -129,10 +106,19 @@ export function builtinProviders(snapshot: unknown): Set<string> {
   return builtins;
 }
 
+/** What the `.env` would give a session: the parsed entries and the ones it would inject. */
+interface Injection {
+  parsedCount: number;
+  unprotectedCount: number;
+  injected: [string, string][];
+}
+
+type AgentCreateRequest = PluginBeforeRequests["agent.create"];
+
 /**
- * Builds the `agent.session_open` before-hook that injects the `.env` chosen by the settings, or the global default. It only ever logs key counts, file paths, error codes and error names, never a key name or a value, and it never throws: on any failure it returns the request unchanged.
+ * Builds the `agent.session_open` before-hook that injects the `.env` chosen by the settings, or the global default, and the `agent.create` before-hook that appends `SECRETS_GUIDELINE` to the system prompt when that injection would add at least one variable. Both share one read path, so a stalled read is shared too. They only ever log key counts, file paths, error codes and error names, never a key name or a value, and they never throw: on any failure they return the request unchanged.
  */
-export function createSessionOpenHook(options: InjectEnvOptions = {}) {
+export function createEnvelopeHooks(options: InjectEnvOptions = {}) {
   const {
     readSettings,
     configTimeoutMs = 5000,
@@ -159,30 +145,33 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
   }
 
   /** The `envFile` setting, or null after a warning when the settings can't be used. */
-  async function readEnvFileSetting(): Promise<{ envFile?: string | undefined } | null> {
+  async function readEnvFileSetting(
+    report: (line: string) => void,
+  ): Promise<{ envFile?: string | undefined } | null> {
     if (readSettings === undefined) return {};
     let state: EnvelopeSettingsState;
     try {
       state = await Promise.resolve().then(readSettings);
     } catch (error) {
-      warn(`settings read failed: ${errorName(error)}`);
+      report(`settings read failed: ${errorName(error)}`);
       return null;
     }
     // The invalid state's `error` can quote stored values, so it is not logged.
     if (state.status === "invalid") {
-      warn("settings invalid");
+      report("settings invalid");
       return null;
     }
     return state.values;
   }
 
-  /** The `.env` content, or null when there is nothing to inject. */
-  async function loadEnvFile(): Promise<string | null> {
-    const setting = await readEnvFileSetting();
+  /** The `.env` content, or null when there is nothing to inject. A quiet call neither warns nor touches the permission-warning state. */
+  async function loadEnvFile(quiet: boolean): Promise<string | null> {
+    const report = quiet ? noop : warn;
+    const setting = await readEnvFileSetting(report);
     if (setting === null) return null;
     const target = resolveEnvFile(setting.envFile, env, home);
     if (target === null) {
-      warn("envFile setting is not an absolute path");
+      report("envFile setting is not an absolute path");
       return null;
     }
     const { path, configured } = target;
@@ -193,10 +182,11 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     } catch (error) {
       const code = errorCode(error);
       if (!configured && (code === "ENOENT" || code === "ENOTDIR")) return null;
-      warn(`read failed: ${code}`);
+      report(`read failed: ${code}`);
       return null;
     }
 
+    if (quiet) return file.content;
     if (platform !== "win32" && (file.mode & 0o044) !== 0) {
       if (warnedFor !== file.identity) {
         warn(`${path} is readable by group or others, run chmod 600`);
@@ -208,30 +198,26 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
     return file.content;
   }
 
-  async function inject(
-    request: PluginSessionOpenRequest,
+  /** The entries the `.env` would inject into a session of `provider` whose explicit env is `explicit`, or null when there is nothing to report. */
+  async function computeInjection(
+    provider: string,
+    explicit: Readonly<Record<string, string>>,
     { paseo, signal }: InjectEnvContext,
-  ): Promise<PluginSessionOpenRequest> {
-    const content = await loadEnvFile();
-    if (content === null) return request;
+    quiet: boolean,
+  ): Promise<Injection | null> {
+    const content = await loadEnvFile(quiet);
+    if (content === null) return null;
 
     const parsed = Object.entries(parseEnvFile(content));
-    if (parsed.length === 0) return request;
+    if (parsed.length === 0) return null;
     const unprotected = parsed.filter(([key]) => !isProtected(key));
-    const candidates = unprotected.filter(([key]) => !Object.hasOwn(request.env, key));
-    const summarize = (injected: number) => {
-      const protectedCount = parsed.length - unprotected.length;
-      const alreadySet = unprotected.length - injected;
-      log(
-        `${request.agentId} (${request.reason}) injected ${injected}` +
-          (protectedCount > 0 ? `, skipped ${protectedCount} protected` : "") +
-          (alreadySet > 0 ? `, ${alreadySet} already set` : ""),
-      );
-    };
-    if (candidates.length === 0) {
-      summarize(0);
-      return request;
-    }
+    const candidates = unprotected.filter(([key]) => !Object.hasOwn(explicit, key));
+    const result = (injected: [string, string][]): Injection => ({
+      parsedCount: parsed.length,
+      unprotectedCount: unprotected.length,
+      injected,
+    });
+    if (candidates.length === 0) return result([]);
 
     // allSettled observes both rejections, so one failing call never leaves the other unhandled.
     const [configResult, snapshotResult] = await Promise.allSettled([
@@ -247,8 +233,8 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
       ).then(builtinProviders),
     ]);
     if (configResult.status === "rejected") {
-      warn(`config read failed: ${errorName(configResult.reason)}`);
-      return request;
+      if (!quiet) warn(`config read failed: ${errorName(configResult.reason)}`);
+      return null;
     }
     const { config } = configResult.value;
     if (!isRecord(config)) throw new TypeError("config is not an object");
@@ -257,26 +243,69 @@ export function createSessionOpenHook(options: InjectEnvOptions = {}) {
       builtins = snapshotResult.value;
     } else {
       // Treating no provider as built-in follows every `extends`, which can only skip more keys.
-      warn(`provider snapshot failed: ${errorName(snapshotResult.reason)}`);
+      if (!quiet) warn(`provider snapshot failed: ${errorName(snapshotResult.reason)}`);
       builtins = new Set();
     }
 
-    const providerKeys = providerEnvKeys(config["providers"], request.provider, builtins);
-    const injected = candidates.filter(([key]) => !providerKeys.has(key));
-    summarize(injected.length);
+    const providerKeys = providerEnvKeys(config["providers"], provider, builtins);
+    return result(candidates.filter(([key]) => !providerKeys.has(key)));
+  }
+
+  async function inject(
+    request: PluginSessionOpenRequest,
+    context: InjectEnvContext,
+  ): Promise<PluginSessionOpenRequest> {
+    const injection = await computeInjection(request.provider, request.env, context, false);
+    if (injection === null) return request;
+    const { parsedCount, unprotectedCount, injected } = injection;
+    const protectedCount = parsedCount - unprotectedCount;
+    const alreadySet = unprotectedCount - injected.length;
+    log(
+      `${request.agentId} (${request.reason}) injected ${injected.length}` +
+        (protectedCount > 0 ? `, skipped ${protectedCount} protected` : "") +
+        (alreadySet > 0 ? `, ${alreadySet} already set` : ""),
+    );
     if (injected.length === 0) return request;
     return { ...request, env: { ...request.env, ...Object.fromEntries(injected) } };
   }
 
-  return async (
-    { request }: { request: PluginSessionOpenRequest },
+  // Silent: the session_open hook runs right after creation and logs and warns for the same file.
+  async function appendGuideline(
+    request: AgentCreateRequest,
     context: InjectEnvContext,
-  ): Promise<PluginSessionOpenRequest> => {
-    try {
-      return await inject(request, context);
-    } catch (error) {
-      warn(`unexpected error: ${errorName(error)}`);
-      return request;
-    }
+  ): Promise<AgentCreateRequest> {
+    const existing = request.config.systemPrompt ?? "";
+    // A stored agent without a provider handle is re-created with its persisted prompt, guideline included, maybe in older wording.
+    if (hasSecretsGuideline(existing)) return request;
+    // The create env is ignored: Paseo drops it at the next session opening, where the `.env` value then applies.
+    const injection = await computeInjection(request.config.provider, {}, context, true);
+    if (injection === null || injection.injected.length === 0) return request;
+    const systemPrompt =
+      existing.trim() === "" ? SECRETS_GUIDELINE : `${existing}\n\n${SECRETS_GUIDELINE}`;
+    return { ...request, config: { ...request.config, systemPrompt } };
+  }
+
+  return {
+    sessionOpen: async (
+      { request }: { request: PluginSessionOpenRequest },
+      context: InjectEnvContext,
+    ): Promise<PluginSessionOpenRequest> => {
+      try {
+        return await inject(request, context);
+      } catch (error) {
+        warn(`unexpected error: ${errorName(error)}`);
+        return request;
+      }
+    },
+    agentCreate: async (
+      { request }: { request: AgentCreateRequest },
+      context: InjectEnvContext,
+    ): Promise<AgentCreateRequest> => {
+      try {
+        return await appendGuideline(request, context);
+      } catch {
+        return request;
+      }
+    },
   };
 }

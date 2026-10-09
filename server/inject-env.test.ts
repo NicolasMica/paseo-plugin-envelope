@@ -12,7 +12,7 @@ import contribute from "../index.server";
 import { envelopeSettings } from "../shared/settings";
 import {
   builtinProviders,
-  createSessionOpenHook,
+  createEnvelopeHooks,
   envFilePath,
   providerEnvKeys,
   resolveEnvFile,
@@ -77,7 +77,7 @@ async function writeEnv(content: string, mode = 0o600) {
 }
 
 function makeHook(options: InjectEnvOptions = {}) {
-  return createSessionOpenHook({
+  return createEnvelopeHooks({
     env: { XDG_CONFIG_HOME: xdg },
     log: (line) => {
       lines.push(line);
@@ -87,7 +87,7 @@ function makeHook(options: InjectEnvOptions = {}) {
     },
     platform: "darwin",
     ...options,
-  });
+  }).sessionOpen;
 }
 
 function makeRequest(overrides: Partial<PluginSessionOpenRequest> = {}): PluginSessionOpenRequest {
@@ -1015,14 +1015,17 @@ describe("result", () => {
 });
 
 describe("registration", () => {
-  it("registers the settings document, the status RPC and a hook that read them", async () => {
+  it("registers the settings document, the status RPC and both hooks on shared settings, with one cleanup", async () => {
     spyOnOutput();
     const custom = join(xdg, "custom.env");
     await writeFile(custom, "A=1", { mode: 0o600 });
-    const remove = vi.fn<() => void>();
-    const before =
-      vi.fn<(event: string, hook: ReturnType<typeof createSessionOpenHook>) => typeof remove>();
-    before.mockReturnValue(remove);
+    const removeCreate = vi.fn<() => void>();
+    const removeSessionOpen = vi.fn<() => void>();
+    type Hooks = ReturnType<typeof createEnvelopeHooks>;
+    const before = vi
+      .fn<(event: string, hook: unknown) => () => void>()
+      .mockReturnValueOnce(removeCreate)
+      .mockReturnValueOnce(removeSessionOpen);
     const read = vi.fn<() => Promise<EnvelopeSettingsState>>(ready(custom));
     const registerSettings = vi.fn<() => { read: typeof read; subscribe: () => typeof noop }>(
       () => ({ read, subscribe: () => noop }),
@@ -1044,13 +1047,25 @@ describe("registration", () => {
     const handler = handle.mock.calls[0]?.[1];
     assert.isDefined(handler, "no status handler registered");
     expect(await handler()).toEqual({ state: "ok", path: custom, source: "setting" });
-    expect(before).toHaveBeenCalledWith("agent.session_open", expect.any(Function));
-    expect(cleanup).toBe(remove);
-    const hook = before.mock.calls[0]?.[1];
-    assert.isDefined(hook, "no hook registered");
-    const result = await hook({ request: makeRequest() }, makeContext().context);
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(before.mock.calls.map(([event]) => event)).toEqual([
+      "agent.create",
+      "agent.session_open",
+    ]);
+    const create = malformed<Hooks["agentCreate"]>(before.mock.calls[0]?.[1]);
+    const sessionOpen = malformed<Hooks["sessionOpen"]>(before.mock.calls[1]?.[1]);
+    const created = await create(
+      { request: { config: { provider: "claude", cwd: "/work" } } },
+      makeContext().context,
+    );
+    expect(created.config.systemPrompt).toMatch(/^## Environment secrets\n/u);
+    const result = await sessionOpen({ request: makeRequest() }, makeContext().context);
+    expect(read).toHaveBeenCalledTimes(3);
     expect(result.env).toEqual({ A: "1" });
+
+    expect(removeCreate).not.toHaveBeenCalled();
+    cleanup();
+    expect(removeCreate).toHaveBeenCalledOnce();
+    expect(removeSessionOpen).toHaveBeenCalledOnce();
   });
 
   it("defines a host settings document with an optional envFile", () => {
@@ -1316,7 +1331,7 @@ describe("secrecy", () => {
     ];
     // Group-readable so the permission warning fires too.
     await writeEnv(content, 0o644);
-    const hook = createSessionOpenHook({ env: { XDG_CONFIG_HOME: xdg } });
+    const hook = createEnvelopeHooks({ env: { XDG_CONFIG_HOME: xdg } }).sessionOpen;
     const okGet = async () => ({
       config: { providers: { claude: { env: { S3CR3T_PROV: "p" } } } },
     });
@@ -1354,7 +1369,7 @@ describe("secrecy", () => {
     const allSkipped = await hook({ request }, ok);
     await mkdir(join(xdg, "dir-case", "paseo-plugin-envelope", ".env"), { recursive: true });
     results.push(
-      await createSessionOpenHook({ env: { XDG_CONFIG_HOME: join(xdg, "dir-case") } })(
+      await createEnvelopeHooks({ env: { XDG_CONFIG_HOME: join(xdg, "dir-case") } }).sessionOpen(
         { request },
         ok,
       ),
@@ -1369,7 +1384,7 @@ describe("secrecy", () => {
     ];
     for (const readSettings of settingsCases) {
       results.push(
-        await createSessionOpenHook({ env: { XDG_CONFIG_HOME: xdg }, readSettings })(
+        await createEnvelopeHooks({ env: { XDG_CONFIG_HOME: xdg }, readSettings }).sessionOpen(
           { request },
           ok,
         ),

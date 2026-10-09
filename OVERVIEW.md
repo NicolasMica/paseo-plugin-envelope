@@ -18,6 +18,10 @@ The settings and the file are read again each time a session opens. A running ag
 - A variable passed with `paseo run --env` wins when the agent is created, then the `.env` value applies after a resume or refresh, because Paseo doesn't keep it. A secret passed this way also ends up in your shell history.
 - `PATH`, `HOME`, `SHELL`, `USER` and `PASEO_*` are never injected.
 
+## Secrets guideline
+
+When a new agent is created and the plugin would inject at least one variable into its later sessions (a `paseo run --env` key doesn't count, since Paseo drops it on resume), it appends a short "Environment secrets" guideline to the agent's system prompt: use variables by reference (`"$NAME"`), never print a value, check one with `[ -n "$NAME" ] && echo set`, and tell the user when one is missing. It names no variable. It comes after the agent's own system prompt and before Paseo's "Append system prompt", and it is kept on resume. The check happens once, at creation: an agent created while the file was missing or empty, or while its provider env set every key, never gets it, even if it receives variables later. Only agents created after the plugin is enabled get it, and ACP providers like Copilot ignore it. It is guidance, not a guarantee: only put in the file what every agent may see.
+
 ## Logs and limits
 
 The plugin logs only counts, paths, error codes and error names, never variable names or values. Only regular files are read: a FIFO or a directory is refused. If the plugin can't read Paseo's config within 5 seconds, or hits an error it catches, the agent starts without the `.env` variables. On OpenCode, injected variables make Paseo start a dedicated OpenCode server for the session.
