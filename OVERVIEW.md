@@ -25,3 +25,7 @@ When a new agent is created and the plugin would inject at least one variable in
 ## Logs and limits
 
 The plugin logs only counts, paths, error codes and error names, never variable names or values. Only regular files are read: a FIFO or a directory is refused. If the plugin can't read Paseo's config within 5 seconds, or hits an error it catches, the agent starts without the `.env` variables. On OpenCode, injected variables make Paseo start a dedicated OpenCode server for the session.
+
+## Codex and MCP servers
+
+Claude Code and Codex agents both see the variables in their shell commands, including names with `KEY`, `SECRET` or `TOKEN`; on Codex, don't set `shell_environment_policy.ignore_default_excludes = false`. A stdio MCP server started by Claude Code inherits the variables; under Codex it doesn't, unless its config lists them in `env_vars`. While a Codex session is open, Codex keeps its shell environment, values included, in a file under `~/.codex/shell_snapshots/`; `[features] shell_snapshot = false` turns that off.

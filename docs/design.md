@@ -52,7 +52,8 @@ From the plugin docs, and from the spike in #3 (live daemon 0.11.1 and its bundl
 
 - High: values leaking through logs. The plugin's output goes to `daemon.log`, and a hook's error message is logged and shown in the app, so the plugin never logs a key name or a value, only counts, paths, error names and error codes restricted to identifier shapes, including in error paths and thrown errors.
 - High: broad exposure. The global `.env` goes to every agent, of every provider. Accepted for V1; scoping comes in V2.
-- Medium: inheritance by stdio MCP servers is unproven. We test it instead of promising it.
+- Medium: stdio MCP servers. Tested in #6: Claude Code passes the agent's environment to them, Codex starts them with a minimal environment plus the server's `env` and `env_vars`. The README documents it rather than promising inheritance.
+- Medium: providers copy the environment elsewhere. Codex keeps a snapshot of the shell environment, values included, in `~/.codex/shell_snapshots/` while a session is open (#6), and that snapshot also bypasses `shell_environment_policy`. Documented in the README; the plugin can't prevent it.
 - Medium: surprising precedence when a variable is removed, or when a resume or refresh drops a `paseo run --env` key and the `.env` value takes over. We test it and document it.
 
 ## Long-term vision
