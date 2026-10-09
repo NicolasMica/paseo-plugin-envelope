@@ -12,7 +12,7 @@ Requirements:
 
 - Paseo 0.11.0 or later on the daemon machine.
 - `npm` on the daemon's `PATH`. On install and update, Paseo runs `npm ci --omit=dev --ignore-scripts` in the plugin checkout to install its one runtime dependency, `dotenv`, from the committed lockfile.
-- Access to this private repository from the daemon machine. Paseo clones `github:` sources over HTTPS with Git's terminal prompt disabled, so Git needs stored GitHub credentials, for example from `gh auth setup-git`.
+- HTTPS access to github.com from the daemon machine. The repository is public, so Paseo clones it without credentials.
 
 ## Install
 
@@ -62,8 +62,8 @@ The file is parsed with [dotenv](https://github.com/motdotla/dotenv)'s `parse`, 
 Example:
 
 ```sh
-# Notion
-NOTION_TOKEN_V2='value with # inside'
+# Example service
+EXAMPLE_API_TOKEN='value with # inside'
 export OPENAI_API_KEY=value
 ```
 
