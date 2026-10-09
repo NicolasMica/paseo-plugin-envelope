@@ -12,7 +12,7 @@ Requirements:
 
 - Paseo 0.11.0 or later on the daemon machine.
 - `npm` on the daemon's `PATH`. On install and update, Paseo runs `npm ci --omit=dev --ignore-scripts` in the plugin checkout to install its one runtime dependency, `dotenv`, from the committed lockfile.
-- Access to this private repository from the daemon machine. Paseo clones `github:` sources over HTTPS with Git's terminal prompt disabled, so Git needs stored GitHub credentials, for example from `gh auth setup-git`.
+- HTTPS access to github.com from the daemon machine.
 
 ## Install
 
@@ -29,7 +29,7 @@ Requirements:
    paseo plugin ls
    ```
 
-To update, run `paseo plugin update envelope`. It shows the available update and asks before applying it. To remove the plugin, run `paseo plugin remove envelope`. Removing it also deletes its settings (see [Use another file](#use-another-file)) but not your `.env`. After removing or disabling it, agents that are already running keep the variables they received until their next session opening.
+To install a reviewed commit rather than the latest `main`, add `--ref <commit>` to the install command. To update, run `paseo plugin update envelope`. It shows the available update and asks before applying it; `paseo plugin update envelope --check` only shows it, and `--ref <commit>` updates to a given commit. To remove the plugin, run `paseo plugin remove envelope`. Removing it also deletes its settings (see [Use another file](#use-another-file)) but not your `.env`. After removing or disabling it, agents that are already running keep the variables they received until their next session opening.
 
 ## Write the `.env`
 
@@ -62,8 +62,8 @@ The file is parsed with [dotenv](https://github.com/motdotla/dotenv)'s `parse`, 
 Example:
 
 ```sh
-# Notion
-NOTION_TOKEN_V2='value with # inside'
+# Example service
+EXAMPLE_API_TOKEN='value with # inside'
 export OPENAI_API_KEY=value
 ```
 
@@ -188,10 +188,13 @@ The logs never say which variables an agent received. To check one without print
 
 ```sh
 npm ci
+npm run prepare # installs the pre-commit hook
 npm run typecheck
 npm run lint
 npm run format:check
 npm test
 ```
+
+`.npmrc` sets `ignore-scripts=true`, so `npm ci` runs no dependency install script and no `prepare`: run `npm run prepare` once per clone to install the pre-commit hook.
 
 The design and its decisions are in [`docs/design.md`](docs/design.md).
