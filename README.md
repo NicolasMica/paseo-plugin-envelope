@@ -159,9 +159,9 @@ Envelope doesn't configure MCP servers. A stdio MCP server that the agent's prov
 Codex starts stdio MCP servers with a minimal environment, plus the server's `env` and the variables named in `env_vars`:
 
 ```toml
-[mcp_servers.notion]
-command = "notion-mcp"
-env_vars = ["NOTION_TOKEN_V2"]
+[mcp_servers.example]
+command = "example-mcp"
+env_vars = ["EXAMPLE_API_TOKEN"]
 ```
 
 An HTTP MCP server isn't started by the agent, so it doesn't inherit the agent's environment. A value reaches it only if its config passes one, for example in a header (not tested).
