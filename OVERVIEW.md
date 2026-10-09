@@ -8,6 +8,8 @@ Envelope needs Paseo 0.11.0 or later, and `npm` on the daemon's `PATH` to instal
 
 Set the path of your `.env` in Settings → Plugins → Envelope → Environment, for example `~/.config/paseo-plugin-envelope/.env`. Until a path is set, the plugin reads nothing and injects nothing. The path must be absolute or start with `~/`. The change applies at the next session opening, without reloading the plugin. A status line under the field shows **Not configured**, or the path in effect and whether the daemon can read a regular file there, checked from its type and permissions without opening the file. The setting is stored in `~/.paseo/plugin-settings/envelope/settings.json` as `{"version": 1, "values": {"envFile": "~/path/to/.env"}}`, which you or an agent can also edit by hand.
 
+Below the path, a Variables section lists the file's keys in the order dotenv returns them (file order, except that integer-like keys such as `123` come first), each marked injected, injected except for the providers whose own env sets it, or protected. Values are masked; Show fetches one value from the daemon on demand and Hide removes it. Refresh hides every value as soon as it is pressed, then re-reads the file; values are also hidden when the app goes to the background, when the screen is closed, and when the app regains focus, which re-reads the list. A key passed with `paseo run --env` isn't listed: it wins for that creation only. A shown value travels to the app over its connection to the daemon (end-to-end encrypted through the relay) and stays in the app's memory while shown; it is never cached, stored or logged, but any client with daemon-management access (`daemon.manage`) can ask for one.
+
 Make the file's directory `chmod 700` and the file `chmod 600`: the plugin warns when group or others can read the file. The file uses dotenv syntax: `KEY=value` per line, no `$VAR` interpolation, and an unquoted `#` starts a comment, so quote values that contain one.
 
 Earlier versions read `~/.config/paseo-plugin-envelope/.env` (or under `$XDG_CONFIG_HOME`) when no path was set. That default is gone: if you relied on it, set the path to that file.
@@ -26,7 +28,7 @@ When a new agent is created and the plugin would inject at least one variable in
 
 ## Logs and limits
 
-The plugin logs only counts, paths, error codes and error names, never variable names or values. Only regular files are read: a FIFO or a directory is refused. If the plugin can't read Paseo's config within 5 seconds, or hits an error it catches, the agent starts without the `.env` variables. On OpenCode, injected variables make Paseo start a dedicated OpenCode server for the session.
+The plugin logs only counts, paths, error codes and error names, never variable names or values; the settings screen shows names, and values on request. Only regular files are read: a FIFO or a directory is refused. If the plugin can't read Paseo's config within 5 seconds, or hits an error it catches, the agent starts without the `.env` variables. On OpenCode, injected variables make Paseo start a dedicated OpenCode server for the session.
 
 ## Codex and MCP servers
 

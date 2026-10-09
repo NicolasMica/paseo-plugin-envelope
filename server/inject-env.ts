@@ -18,17 +18,28 @@ const PROTECTED_KEYS = new Set(["PATH", "HOME", "SHELL", "USER"]);
 
 export type EnvelopeSettingsState = PluginSettingsState<typeof envelopeSettings.schema>;
 
-export interface InjectEnvOptions {
-  /** Reads the plugin settings on every session open and agent creation. */
+export interface EnvSourceOptions {
+  /** Reads the plugin settings on every load. */
   readSettings: () => Promise<EnvelopeSettingsState>;
+  /** Bounds `paseo.config.get()` and `paseo.providers.snapshot()`, each on its own. */
   configTimeoutMs?: number;
   /** Bounds the whole `.env` read: a file on a stalled mount can block `open`, `stat` or `read` with no limit. */
   readTimeoutMs?: number;
+  homedir?: () => string;
+}
+
+export interface InjectEnvLogOptions {
   log?: (line: string) => void;
   warn?: (line: string) => void;
-  homedir?: () => string;
   platform?: NodeJS.Platform;
 }
+
+/** The hooks either share an `EnvSource` with the RPC handlers, or build their own from the source options; never both, so a source option can't be silently ignored. */
+export type InjectEnvOptions = InjectEnvLogOptions &
+  (
+    | ({ source: EnvSource } & { [Key in keyof EnvSourceOptions]?: never })
+    | (EnvSourceOptions & { source?: never })
+  );
 
 /** The part of the hook context the hook uses, so tests can pass a fake `paseo`. */
 export interface InjectEnvContext {
@@ -41,7 +52,8 @@ export interface InjectEnvContext {
 
 const noop = () => {};
 
-function isProtected(key: string): boolean {
+/** `PATH`, `HOME`, `SHELL`, `USER` and `PASEO_*`, which the `.env` never overrides. */
+export function isProtected(key: string): boolean {
   return PROTECTED_KEYS.has(key) || key.startsWith("PASEO_");
 }
 
@@ -95,30 +107,40 @@ export function builtinProviders(snapshot: unknown): Set<string> {
   return builtins;
 }
 
-/** What the `.env` would give a session: the parsed entries and the ones it would inject. */
-interface Injection {
-  parsedCount: number;
-  unprotectedCount: number;
-  injected: [string, string][];
+/** The outcome of loading the `.env` the settings point to. Failures keep their raw error, so each caller decides what it may report. */
+export type EnvLoad =
+  | { state: "ok"; path: string; file: EnvFile }
+  | { state: "settings-unreadable"; error: unknown }
+  /** The invalid state's `error` can quote stored values, so it is not kept. */
+  | { state: "invalid-settings" }
+  /** Resolving the path threw, for example `homedir` without a home directory. */
+  | { state: "unresolved"; error: unknown }
+  | { state: "not-configured" }
+  | { state: "relative" }
+  | { state: "read-failed"; path: string; error: unknown };
+
+/** The provider config and the built-in ids, each settled on its own. */
+export interface ProvidersRead {
+  config: PromiseSettledResult<{ config: unknown }>;
+  builtins: PromiseSettledResult<Set<string>>;
 }
 
-type AgentCreateRequest = PluginBeforeRequests["agent.create"];
+/** The `.env` read path shared by the hooks and the RPC handlers, so a stalled read is shared too. It never logs. */
+export interface EnvSource {
+  /** Reads the settings, resolves the path and reads the file under the read timeout. Never rejects. */
+  load(): Promise<EnvLoad>;
+  /** Reads `paseo.config.get()` and the built-in provider ids in parallel, each under the config timeout and `signal`. Never rejects. */
+  readProviders(paseo: InjectEnvContext["paseo"], signal?: AbortSignal): Promise<ProvidersRead>;
+}
 
-/**
- * Builds the `agent.session_open` before-hook that injects the `.env` the `envFile` setting points to, nothing when it is unset, and the `agent.create` before-hook that appends `SECRETS_GUIDELINE` to the system prompt when that injection would add at least one variable. Both share one read path, so a stalled read is shared too. They only ever log key counts, file paths, error codes and error names, never a key name or a value, and they never throw: on any failure they return the request unchanged.
- */
-export function createEnvelopeHooks(options: InjectEnvOptions) {
+export function createEnvSource(options: EnvSourceOptions): EnvSource {
   const {
     readSettings,
     configTimeoutMs = 5000,
     readTimeoutMs = 5000,
-    log = (line: string) => console.log(line),
-    warn = (line: string) => console.warn(line),
     homedir: home = homedir,
-    platform = process.platform,
   } = options;
-  let warnedFor: string | undefined;
-  // A read stuck on a stalled mount holds a libuv thread until it settles, so later session openings share it instead of blocking more threads.
+  // A read stuck on a stalled mount holds a libuv thread until it settles, so later callers share it instead of blocking more threads.
   const pendingReads = new Map<string, Promise<EnvFile>>();
 
   function readShared(path: string): Promise<EnvFile> {
@@ -132,44 +154,101 @@ export function createEnvelopeHooks(options: InjectEnvOptions) {
     return read;
   }
 
-  /** The `envFile` setting, or null after a warning when the settings can't be used. */
-  async function readEnvFileSetting(
-    report: (line: string) => void,
-  ): Promise<{ envFile?: string | undefined } | null> {
+  async function load(): Promise<EnvLoad> {
     let state: EnvelopeSettingsState;
     try {
       state = await Promise.resolve().then(readSettings);
     } catch (error) {
-      report(`settings read failed: ${errorName(error)}`);
-      return null;
+      return { state: "settings-unreadable", error };
     }
-    // The invalid state's `error` can quote stored values, so it is not logged.
-    if (state.status === "invalid") {
-      report("settings invalid");
-      return null;
+    if (state.status === "invalid") return { state: "invalid-settings" };
+    let path: ReturnType<typeof resolveEnvFile>;
+    try {
+      path = resolveEnvFile(state.values.envFile, home);
+    } catch (error) {
+      return { state: "unresolved", error };
     }
-    return state.values;
+    if (path === undefined) return { state: "not-configured" };
+    if (path === null) return { state: "relative" };
+    try {
+      // No hook signal: Paseo only aborts once it stopped waiting, and the read is bounded anyway.
+      return { state: "ok", path, file: await withTimeout(readShared(path), readTimeoutMs) };
+    } catch (error) {
+      return { state: "read-failed", path, error };
+    }
   }
+
+  async function readProviders(
+    paseo: InjectEnvContext["paseo"],
+    signal?: AbortSignal,
+  ): Promise<ProvidersRead> {
+    // allSettled observes both rejections, so one failing call never leaves the other unhandled.
+    const [config, builtins] = await Promise.allSettled([
+      withTimeout(
+        Promise.resolve().then(() => paseo.config.get()),
+        configTimeoutMs,
+        signal,
+      ),
+      withTimeout(
+        Promise.resolve().then(() => paseo.providers.snapshot()),
+        configTimeoutMs,
+        signal,
+      ).then(builtinProviders),
+    ]);
+    return { config, builtins };
+  }
+
+  return { load, readProviders };
+}
+
+/** What the `.env` would give a session: the parsed entries and the ones it would inject. */
+interface Injection {
+  parsedCount: number;
+  unprotectedCount: number;
+  injected: [string, string][];
+}
+
+type AgentCreateRequest = PluginBeforeRequests["agent.create"];
+
+/**
+ * Builds the `agent.session_open` before-hook that injects the `.env` the `envFile` setting points to, nothing when it is unset, and the `agent.create` before-hook that appends `SECRETS_GUIDELINE` to the system prompt when that injection would add at least one variable. Both read through one `EnvSource`, shared with the `env-vars` RPC handlers when one is passed, so a stalled read is shared too. They only ever log key counts, file paths, error codes and error names, never a key name or a value, and they never throw: on any failure they return the request unchanged.
+ */
+export function createEnvelopeHooks(options: InjectEnvOptions) {
+  const {
+    log = (line: string) => console.log(line),
+    warn = (line: string) => console.warn(line),
+    platform = process.platform,
+  } = options;
+  const source = options.source ?? createEnvSource(options);
+  let warnedFor: string | undefined;
 
   /** The `.env` content, or null when there is nothing to inject. A quiet call neither warns nor touches the permission-warning state. */
   async function loadEnvFile(quiet: boolean): Promise<string | null> {
     const report = quiet ? noop : warn;
-    const setting = await readEnvFileSetting(report);
-    if (setting === null) return null;
-    const path = resolveEnvFile(setting.envFile, home);
-    if (path === undefined) return null;
-    if (path === null) {
-      report("envFile setting is not an absolute path");
-      return null;
+    const loaded = await source.load();
+    switch (loaded.state) {
+      case "settings-unreadable":
+        report(`settings read failed: ${errorName(loaded.error)}`);
+        return null;
+      // The invalid state's `error` can quote stored values, so it is not logged.
+      case "invalid-settings":
+        report("settings invalid");
+        return null;
+      // Left to the hooks' own error handling, as before the source existed.
+      case "unresolved":
+        throw loaded.error;
+      case "not-configured":
+        return null;
+      case "relative":
+        report("envFile setting is not an absolute path");
+        return null;
+      case "read-failed":
+        report(`read failed: ${errorCode(loaded.error)}`);
+        return null;
+      case "ok":
+        break;
     }
-    let file: EnvFile;
-    try {
-      // No hook signal: Paseo only aborts once it stopped waiting, and the read is bounded anyway.
-      file = await withTimeout(readShared(path), readTimeoutMs);
-    } catch (error) {
-      report(`read failed: ${errorCode(error)}`);
-      return null;
-    }
+    const { path, file } = loaded;
 
     if (quiet) return file.content;
     if (platform !== "win32" && (file.mode & 0o044) !== 0) {
@@ -204,19 +283,10 @@ export function createEnvelopeHooks(options: InjectEnvOptions) {
     });
     if (candidates.length === 0) return result([]);
 
-    // allSettled observes both rejections, so one failing call never leaves the other unhandled.
-    const [configResult, snapshotResult] = await Promise.allSettled([
-      withTimeout(
-        Promise.resolve().then(() => paseo.config.get()),
-        configTimeoutMs,
-        signal,
-      ),
-      withTimeout(
-        Promise.resolve().then(() => paseo.providers.snapshot()),
-        configTimeoutMs,
-        signal,
-      ).then(builtinProviders),
-    ]);
+    const { config: configResult, builtins: snapshotResult } = await source.readProviders(
+      paseo,
+      signal,
+    );
     if (configResult.status === "rejected") {
       if (!quiet) warn(`config read failed: ${errorName(configResult.reason)}`);
       return null;

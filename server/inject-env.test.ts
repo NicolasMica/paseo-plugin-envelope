@@ -15,9 +15,10 @@ import {
   createEnvelopeHooks,
   providerEnvKeys,
   resolveEnvFile,
+  type EnvSourceOptions,
   type EnvelopeSettingsState,
   type InjectEnvContext,
-  type InjectEnvOptions,
+  type InjectEnvLogOptions,
 } from "./inject-env";
 
 // Pass-through by default, so a test can make one `open` fail in a way the real filesystem can't.
@@ -75,7 +76,7 @@ async function writeEnv(content: string, mode = 0o600) {
   await chmod(envPath(), mode);
 }
 
-function makeHook(options: Partial<InjectEnvOptions> = {}) {
+function makeHook(options: Partial<EnvSourceOptions & InjectEnvLogOptions> = {}) {
   return createEnvelopeHooks({
     readSettings: ready(envPath()),
     log: (line) => {
@@ -473,10 +474,7 @@ describe("logged counts", () => {
 describe("settings", () => {
   const custom = () => join(xdg, "custom.env");
 
-  async function runWith(
-    readSettings: NonNullable<InjectEnvOptions["readSettings"]>,
-    options = {},
-  ) {
+  async function runWith(readSettings: EnvSourceOptions["readSettings"], options = {}) {
     const request = makeRequest();
     const { context, get } = makeContext();
     const result = await makeHook({ readSettings, ...options })({ request }, context);
@@ -504,6 +502,18 @@ describe("settings", () => {
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["read failed: EISDIR"]);
+  });
+
+  it("warns with the error name when the home directory can't be resolved", async () => {
+    const homedir = () => {
+      throw Object.assign(new Error("no home"), { name: "SystemError" });
+    };
+
+    const { result, request, get } = await runWith(ready("~/custom.env"), { homedir });
+
+    expect(result).toBe(request);
+    expect(get).not.toHaveBeenCalled();
+    expect(warnings).toEqual(["unexpected error: SystemError"]);
   });
 
   it.each(["custom.env", "./custom.env", "~user/custom.env", "~custom.env"])(
