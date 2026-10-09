@@ -198,3 +198,7 @@ npm test
 `.npmrc` sets `ignore-scripts=true`, so `npm ci` runs no dependency install script and no `prepare`: run `npm run prepare` once per clone to install the pre-commit hook.
 
 The design and its decisions are in [`docs/design.md`](docs/design.md).
+
+## License
+
+[MIT](LICENSE).
