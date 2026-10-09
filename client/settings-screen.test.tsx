@@ -1,12 +1,12 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, useSyncExternalStore } from "react";
+import { act, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root, type TestInstance } from "test-renderer";
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { envFileBrowse, type EnvFileBrowse } from "../shared/env-file-browse";
 import { envFileStatus, type EnvFileStatus } from "../shared/env-file-status";
 import { envelopeSettings } from "../shared/settings";
-import { envFilePathError } from "./env-file-path";
 import type { EnvelopeSettings, EnvelopeValues, ReadySettings } from "./section";
 import { SettingsScreen } from "./settings-screen";
 
@@ -14,21 +14,19 @@ interface Parser {
   parse(value: unknown): unknown;
 }
 
-/** The host-provided state this test drives: the settings document and the status RPC. */
+/** The host-provided state this test drives: the settings document and the RPC handlers, by contract name. */
 const host = vi.hoisted(() => {
   const state: {
     settings: unknown;
     listeners: Set<() => void>;
-    rpc: (input: unknown) => Promise<unknown>;
-    rpcContract: unknown;
+    handlers: Map<string, (input: unknown) => Promise<unknown>>;
+    contracts: Set<unknown>;
     settingsDefinition: unknown;
   } = {
     settings: undefined,
     listeners: new Set(),
-    rpc: async () => {
-      throw new Error("no RPC stub");
-    },
-    rpcContract: undefined,
+    handlers: new Map(),
+    contracts: new Set(),
     settingsDefinition: undefined,
   };
   return state;
@@ -42,6 +40,23 @@ vi.mock("@getpaseo/plugin/client/ui", () => ({
   SettingsRow: "SettingsRow",
   SettingsSection: "SettingsSection",
 }));
+
+// Renders its children only while open, like the host's sheet or dialog.
+vi.mock("@getpaseo/plugin/client/react-native", async () => {
+  const { createElement } = await import("react");
+  function Modal({
+    open,
+    children,
+    ...props
+  }: {
+    open: boolean;
+    children: ReactNode;
+    [prop: string]: unknown;
+  }) {
+    return open ? createElement("Modal", props, children) : null;
+  }
+  return { Modal: Object.assign(Modal, { Content: "ModalContent" }) };
+});
 
 vi.mock("@getpaseo/plugin/client", () => ({
   useSettings: (definition: unknown) => {
@@ -57,10 +72,13 @@ vi.mock("@getpaseo/plugin/client", () => ({
     );
   },
   // Validates both ways like the real `useRpc`, so every fixture is checked against the contract.
-  useRpc: (contract: { input: Parser; output: Parser }) => {
-    host.rpcContract = contract;
-    return async (input: unknown) =>
-      contract.output.parse(await host.rpc(contract.input.parse(input)));
+  useRpc: (contract: { name: string; input: Parser; output: Parser }) => {
+    host.contracts.add(contract);
+    return async (input: unknown) => {
+      const handler = host.handlers.get(contract.name);
+      if (handler === undefined) throw new Error(`no handler for ${contract.name}`);
+      return contract.output.parse(await handler(contract.input.parse(input)));
+    };
   },
 }));
 
@@ -72,6 +90,7 @@ const save = vi.fn<Actions["save"]>();
 const reset = vi.fn<Actions["reset"]>();
 const reload = vi.fn<Actions["reload"]>();
 const rpc = vi.fn<(input: unknown) => Promise<EnvFileStatus>>();
+const browseRpc = vi.fn<(input: unknown) => Promise<EnvFileBrowse>>();
 
 function setSettings(state: EnvelopeSettings) {
   host.settings = state;
@@ -118,8 +137,12 @@ beforeEach(() => {
   reset.mockReset();
   reload.mockReset();
   rpc.mockReset();
+  browseRpc.mockReset();
   reload.mockResolvedValue();
-  host.rpc = rpc;
+  host.handlers = new Map<string, (input: unknown) => Promise<unknown>>([
+    [envFileStatus.name, rpc],
+    [envFileBrowse.name, browseRpc],
+  ]);
   // The row sets its own `retry`; no delay keeps a retried failure fast.
   queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
   root = createRoot();
@@ -317,7 +340,7 @@ describe("path editor", () => {
 
     await type("agents.env");
 
-    expect(input().props["error"]).toBe(envFilePathError("agents.env"));
+    expect(input().props["error"]).toMatch(/absolute/u);
     expect(find("SettingsAction", "Save").props["disabled"]).toBe(true);
   });
 
@@ -429,7 +452,7 @@ describe("status row", () => {
   it("calls the status RPC with an empty input", async () => {
     await statusFor({ state: "ok", path: "/a" });
 
-    expect(host.rpcContract).toBe(envFileStatus);
+    expect(host.contracts).toContain(envFileStatus);
     expect(rpc).toHaveBeenCalledWith({});
   });
 
@@ -493,12 +516,20 @@ describe("status row", () => {
   });
 
   it("strips unknown status keys and refuses a status that breaks the contract", async () => {
-    host.rpc = async () => ({ state: "ok", path: "/a.env", content: 1 });
+    host.handlers.set(envFileStatus.name, async () => ({
+      state: "ok",
+      path: "/a.env",
+      content: 1,
+    }));
     await render(ready({}));
     await settle();
     expect(statusRow().props["label"]).toBe("File found");
 
-    host.rpc = async () => ({ state: "error", path: "/a.env", code: "x=1" });
+    host.handlers.set(envFileStatus.name, async () => ({
+      state: "error",
+      path: "/a.env",
+      code: "x=1",
+    }));
     await call(statusRow(), "onPress");
     await settle();
     expect(statusRow().props["label"]).toBe("File check failed");
@@ -519,5 +550,125 @@ describe("status row", () => {
     await settle();
     expect(rpc).toHaveBeenCalledTimes(3);
     expect(statusRow().props["hint"]).toBe("/b.env");
+  });
+});
+
+describe("browse", () => {
+  const listing: EnvFileBrowse = {
+    state: "ok",
+    path: "/home/me/a",
+    display: "~/a",
+    parent: "~",
+    separator: "/",
+    entries: [
+      { name: "b", kind: "directory" },
+      { name: ".env", kind: "file" },
+    ],
+    total: 2,
+  };
+  const modal = () => all("Modal");
+  async function dismiss() {
+    const [node] = modal();
+    assert.isDefined(node, "the picker is closed");
+    expect(node.props["title"]).toBe("Choose the .env file");
+    await call(node, "onOpenChange", false);
+  }
+
+  beforeEach(() => {
+    rpc.mockResolvedValue({ state: "ok", path: "/home/me/a/.env" });
+    browseRpc.mockResolvedValue(listing);
+  });
+
+  it("opens the picker at the saved path's folder", async () => {
+    await render(ready({ envFile: "~/a/.env" }));
+    expect(modal()).toHaveLength(0);
+    expect(browseRpc).not.toHaveBeenCalled();
+
+    await press("Browse");
+
+    expect(modal()).toHaveLength(1);
+    expect(host.contracts).toContain(envFileBrowse);
+    expect(browseRpc).toHaveBeenCalledWith({ path: "~/a/.env", containing: true });
+  });
+
+  it("opens the picker at the draft's folder, or the home for an invalid draft", async () => {
+    await render(ready({ envFile: "~/a/.env" }));
+
+    await type(" ~/b/.env ");
+    await press("Browse");
+    expect(browseRpc).toHaveBeenLastCalledWith({ path: "~/b/.env", containing: true });
+
+    await dismiss();
+    expect(modal()).toHaveLength(0);
+    await type("agents.env");
+    await press("Browse");
+    expect(browseRpc).toHaveBeenLastCalledWith({ path: "", containing: true });
+  });
+
+  it("starts again from the current path each time it opens", async () => {
+    await render(ready({ envFile: "~/a/.env" }));
+    await press("Browse");
+    await press("Open");
+    expect(browseRpc).toHaveBeenLastCalledWith({ path: "~/a/b" });
+
+    await dismiss();
+    browseRpc.mockClear();
+    await press("Browse");
+
+    expect(browseRpc).toHaveBeenCalledWith({ path: "~/a/.env", containing: true });
+  });
+
+  it("fills the field with the picked file as a draft that Save applies", async () => {
+    save.mockResolvedValue(true);
+    await render(ready({ envFile: "~/old.env" }));
+    const before = input();
+
+    await press("Browse");
+    await press("Choose");
+
+    expect(modal()).toHaveLength(0);
+    expect(input()).not.toBe(before);
+    expect(input().props["initialValue"]).toBe("~/a/.env");
+    expect(has("SettingsAction", "Unsaved change")).toBe(true);
+    await press("Save");
+    expect(save).toHaveBeenCalledWith({ envFile: "~/a/.env" }, "r1");
+  });
+
+  it("keeps the revision captured when typing started, so a pick over another client's save is a conflict", async () => {
+    save.mockImplementation(async () => {
+      setSettings(ready({ envFile: "~/other.env" }, "r2", { saveError: "revision conflict" }));
+      return false;
+    });
+    await render(ready({ envFile: "~/old.env" }, "r1"));
+    await type("~/typed.env");
+    await act(async () => setSettings(ready({ envFile: "~/other.env" }, "r2")));
+
+    await press("Browse");
+    await press("Choose");
+    expect(input().props["initialValue"]).toBe("~/a/.env");
+    await press("Save");
+
+    expect(save).toHaveBeenCalledWith({ envFile: "~/a/.env" }, "r1");
+    expect(input().props["error"]).toBe("revision conflict");
+    expect(has("SettingsAction", "Reload")).toBe(true);
+  });
+
+  it("keeps a picked path when the draft is edited further", async () => {
+    await render(ready({ envFile: "~/old.env" }));
+    await press("Browse");
+    await press("Choose");
+    const picked = input();
+
+    await type("~/a/.env2");
+
+    expect(input()).toBe(picked);
+    expect(input().props["initialValue"]).toBe("~/a/.env");
+    expect(has("SettingsAction", "Unsaved change")).toBe(true);
+  });
+
+  it("disables Browse while saving", async () => {
+    await render(ready({ envFile: "~/a/.env" }, "r1", { saving: true }));
+
+    expect(find("SettingsAction", "Browse").props["disabled"]).toBe(true);
   });
 });

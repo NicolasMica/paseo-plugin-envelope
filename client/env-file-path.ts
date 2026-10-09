@@ -19,3 +19,9 @@ export function withEnvFile(values: EnvelopeValues, text: string): EnvelopeValue
   delete next.envFile;
   return next;
 }
+
+/** The path of `name` in a listed directory, in the directory's display form. The home joins with `/`, the only home form the daemon expands. */
+export function childPath(directory: string, separator: string, name: string): string {
+  if (directory === "~") return `~/${name}`;
+  return directory.endsWith(separator) ? `${directory}${name}` : `${directory}${separator}${name}`;
+}

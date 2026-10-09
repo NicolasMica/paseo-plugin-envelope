@@ -13,6 +13,7 @@ import { envelopeSettings } from "../shared/settings";
 import {
   builtinProviders,
   createEnvelopeHooks,
+  expandHome,
   providerEnvKeys,
   resolveEnvFile,
   type EnvelopeSettingsState,
@@ -637,6 +638,17 @@ describe("settings", () => {
     expect(resolveEnvFile("", home)).toBeUndefined();
     expect(resolveEnvFile("a.env", home)).toBeNull();
   });
+
+  it("expands only a leading ~ or ~/, calling home only then", () => {
+    const home = vi.fn<() => string>(() => "/home/me");
+
+    expect(expandHome("~", home)).toBe("/home/me");
+    expect(expandHome("~/a/b.env", home)).toBe("/home/me/a/b.env");
+    expect(home).toHaveBeenCalledTimes(2);
+    expect(expandHome("~user/a.env", home)).toBe("~user/a.env");
+    expect(expandHome("/a/~/b", home)).toBe("/a/~/b");
+    expect(home).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("precedence", () => {
@@ -939,7 +951,7 @@ describe("result", () => {
 });
 
 describe("registration", () => {
-  it("registers the settings document, the status RPC and both hooks on shared settings, with one cleanup", async () => {
+  it("registers the settings document, the status and browse RPCs and both hooks on shared settings, with one cleanup", async () => {
     spyOnOutput();
     const custom = join(xdg, "custom.env");
     await writeFile(custom, "A=1", { mode: 0o600 });
@@ -954,7 +966,8 @@ describe("registration", () => {
     const registerSettings = vi.fn<() => { read: typeof read; subscribe: () => typeof noop }>(
       () => ({ read, subscribe: () => noop }),
     );
-    const handle = vi.fn<(contract: { name: string }, handler: () => Promise<unknown>) => void>();
+    const handle =
+      vi.fn<(contract: { name: string }, handler: (input?: unknown) => Promise<unknown>) => void>();
     const server = malformed<Parameters<typeof contribute>[0]>({
       before,
       handle,
@@ -971,6 +984,10 @@ describe("registration", () => {
     const handler = handle.mock.calls[0]?.[1];
     assert.isDefined(handler, "no status handler registered");
     expect(await handler()).toEqual({ state: "ok", path: custom });
+    expect(handle.mock.calls[1]?.[0]).toMatchObject({ name: "env-file.browse" });
+    const browse = handle.mock.calls[1]?.[1];
+    assert.isDefined(browse, "no browse handler registered");
+    expect(await browse({ path: xdg })).toMatchObject({ state: "ok", path: xdg });
     expect(before.mock.calls.map(([event]) => event)).toEqual([
       "agent.create",
       "agent.session_open",

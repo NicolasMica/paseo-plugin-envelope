@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { envFilePathError, withEnvFile } from "./env-file-path";
+import { childPath, envFilePathError, withEnvFile } from "./env-file-path";
 import { run } from "./run";
 
 describe("path helpers", () => {
@@ -21,6 +21,15 @@ describe("path helpers", () => {
   it("keeps the other values and removes an emptied setting", () => {
     expect(withEnvFile({ envFile: "/a" }, " /b ")).toEqual({ envFile: "/b" });
     expect(withEnvFile({ envFile: "/a" }, "")).toEqual({});
+  });
+
+  it("joins a name onto a listed directory without doubling the separator", () => {
+    expect(childPath("~", "/", ".env")).toBe("~/.env");
+    expect(childPath("~", "\\", ".env")).toBe("~/.env");
+    expect(childPath("~/a", "/", ".env")).toBe("~/a/.env");
+    expect(childPath("/", "/", "etc")).toBe("/etc");
+    expect(childPath("C:\\", "\\", "a.env")).toBe("C:\\a.env");
+    expect(childPath("C:\\Users", "\\", "a.env")).toBe("C:\\Users\\a.env");
   });
 
   it("swallows a rejected action, which reports through its own state", async () => {

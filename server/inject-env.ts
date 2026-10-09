@@ -45,14 +45,18 @@ function isProtected(key: string): boolean {
   return PROTECTED_KEYS.has(key) || key.startsWith("PASEO_");
 }
 
+/** `path` with a leading `~` or `~/` expanded to the daemon user's home; `home` is only called then. */
+export function expandHome(path: string, home: () => string): string {
+  return path === "~" || path.startsWith("~/") ? join(home(), path.slice(1)) : path;
+}
+
 /** Where to read the `.env`: the `envFile` setting with a leading `~` expanded. Undefined when the setting is unset or empty, null when it is not an absolute path. */
 export function resolveEnvFile(
   envFile: string | undefined,
   home: () => string,
 ): string | null | undefined {
   if (envFile === undefined || envFile === "") return undefined;
-  const path =
-    envFile === "~" || envFile.startsWith("~/") ? join(home(), envFile.slice(1)) : envFile;
+  const path = expandHome(envFile, home);
   return isAbsolute(path) ? path : null;
 }
 
