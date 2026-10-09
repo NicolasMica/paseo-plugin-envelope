@@ -89,6 +89,20 @@ If the settings file isn't valid JSON or doesn't match this shape, Envelope warn
 
 Earlier versions read `$XDG_CONFIG_HOME/paseo-plugin-envelope/.env`, or `~/.config/paseo-plugin-envelope/.env`, when no path was set. Envelope no longer has a default: if you relied on it, set the path to that file, otherwise your agents stop receiving its variables at their next session opening.
 
+## See the variables
+
+Under the path, the **Variables** section of Settings → Plugins → Envelope → Environment lists the keys of the file in effect, in file order, with what happens to each one at the next session opening:
+
+- **Injected**: every new session receives it.
+- **Injected, except for claude, codex: set in their provider env**: the provider env in Paseo's `config.json` (including a provider it extends) already sets the key, so sessions of those providers keep their own value (see [Precedence](#precedence)).
+- **Protected: never injected**: `PATH`, `HOME`, `SHELL`, `USER` and `PASEO_*`.
+
+A key passed with `paseo run --env` when creating an agent wins for that creation only. The list can't know about it, so it isn't shown. If Envelope can't read Paseo's config, the section says so and shows every unprotected key as injected.
+
+Values are masked (`••••••••`, always the same length). **Show** on a row asks the daemon for that one value, read from the file at that moment, and **Hide** removes it from the screen. **Refresh** reads the file again and hides every shown value, as does saving a new path or leaving the screen. When no path is set, the file can't be read, or it has no variable, the section shows **Nothing to list** and points to the path field; the status line under the path says why.
+
+What travels where: the list sends only key names and statuses from the daemon to the app. A value only leaves the daemon when you press **Show**, and only that value. It goes over the app's connection to the daemon, end-to-end encrypted through the relay for remote and mobile clients, and stays in the app's memory while it is shown. Envelope doesn't keep it anywhere: not in its settings, not in a cache, not in its logs, and Paseo doesn't log plugin RPC payloads. Any client connected to the daemon can ask for a value, so only connect clients you trust.
+
 ## When variables apply
 
 Envelope reads its settings and the file again every time an agent session opens: on create, resume, refresh and import. If no path is set, it reads nothing and logs nothing.
@@ -140,6 +154,7 @@ This is guidance, not a guarantee: an agent can still print or send a value. Onl
 
 - **Every agent sees every variable.** There is no per-project, per-provider or per-agent scope. An agent can print a value in its transcript, in command output, or pass it to a tool. Providers keep transcripts on disk, so a printed value stays there after the session ends. The [secrets guideline](#secrets-guideline) asks new agents not to print values, but it can't enforce it, and agents created before Envelope, or on ACP providers, don't get it.
 - **Values stay in plain text** in the `.env`. Keep it at `chmod 600` in a `chmod 700` directory. On macOS and Linux, Envelope logs a warning when the file is readable by group or others, once until the file or its mode changes.
+- **The settings screen can show values.** Key names are always listed, and **Show** sends one value to the app that asks for it (see [See the variables](#see-the-variables)). Any client connected to the daemon, including remote and mobile ones, can do it. A malformed line can turn part of a value into a key, which the list then shows as a name.
 - **Envelope logs counts, not names.** Its output contains agent ids, session reasons, counts, the file path, error codes and error names, never a variable name or a value. A malformed line can turn part of a value into a key, so even names could leak a value.
 - **Don't run the daemon at the `trace` log level while agents handle secrets.** At `trace`, Paseo logs raw provider events, including tool output, so a value an agent prints lands in `daemon.log`. The default `info` level doesn't log the injected environment.
 - **Only regular files are read.** A FIFO, a socket or a directory at the file's path is refused with a warning, so it can't hang the session opening.

@@ -64,6 +64,9 @@ vi.mock("@getpaseo/plugin/client", () => ({
   },
 }));
 
+// The variables section has its own tests (variables-section.test.tsx); here it renders nothing, so its RPC and rows stay out of these.
+vi.mock("./variables-section", () => ({ VariablesSection: () => null }));
+
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 
 type Actions = Pick<EnvelopeSettings, "save" | "reset" | "reload">;

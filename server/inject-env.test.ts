@@ -15,6 +15,7 @@ import {
   createEnvelopeHooks,
   providerEnvKeys,
   resolveEnvFile,
+  type EnvSourceOptions,
   type EnvelopeSettingsState,
   type InjectEnvContext,
   type InjectEnvOptions,
@@ -473,10 +474,7 @@ describe("logged counts", () => {
 describe("settings", () => {
   const custom = () => join(xdg, "custom.env");
 
-  async function runWith(
-    readSettings: NonNullable<InjectEnvOptions["readSettings"]>,
-    options = {},
-  ) {
+  async function runWith(readSettings: EnvSourceOptions["readSettings"], options = {}) {
     const request = makeRequest();
     const { context, get } = makeContext();
     const result = await makeHook({ readSettings, ...options })({ request }, context);
@@ -504,6 +502,18 @@ describe("settings", () => {
 
     expect(result).toBe(request);
     expect(warnings).toEqual(["read failed: EISDIR"]);
+  });
+
+  it("warns with the error name when the home directory can't be resolved", async () => {
+    const homedir = () => {
+      throw Object.assign(new Error("no home"), { name: "SystemError" });
+    };
+
+    const { result, request, get } = await runWith(ready("~/custom.env"), { homedir });
+
+    expect(result).toBe(request);
+    expect(get).not.toHaveBeenCalled();
+    expect(warnings).toEqual(["unexpected error: SystemError"]);
   });
 
   it.each(["custom.env", "./custom.env", "~user/custom.env", "~custom.env"])(

@@ -11,10 +11,12 @@ import { envelopeSettings } from "../shared/settings";
 import { EnvFileSection } from "./env-file-section";
 import { run } from "./run";
 import type { SettingsSectionProps } from "./section";
+import { VariablesSection } from "./variables-section";
 
 /** The sections of the screen, in order. Each one gets the loaded settings. */
 const SECTIONS: readonly { id: string; Component: ComponentType<SettingsSectionProps> }[] = [
   { id: "env-file", Component: EnvFileSection },
+  { id: "variables", Component: VariablesSection },
 ];
 
 /** Envelope's screen under Settings → Plugins → Envelope. */
