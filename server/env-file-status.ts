@@ -11,7 +11,6 @@ export interface EnvFileStatusOptions {
   readSettings: () => Promise<EnvelopeSettingsState>;
   /** Bounds the `stat` and `access`: a file on a stalled mount can block them with no limit. */
   timeoutMs?: number;
-  env?: NodeJS.ProcessEnv;
   homedir?: () => string;
   stat?: (path: string) => Promise<{ isFile(): boolean }>;
   /** Checks that the daemon can open a regular file for reading, as the hook does. */
@@ -27,7 +26,6 @@ export function createEnvFileStatusHandler(options: EnvFileStatusOptions) {
   const {
     readSettings,
     timeoutMs = 5000,
-    env = process.env,
     homedir: home = homedir,
     stat = statPath,
     access = accessPath,
@@ -63,23 +61,22 @@ export function createEnvFileStatusHandler(options: EnvFileStatusOptions) {
     // The invalid state's `error` can quote stored values, so it is not returned.
     if (settings.status === "invalid") return { state: "invalid-settings" };
 
-    let target: ReturnType<typeof resolveEnvFile>;
+    let path: ReturnType<typeof resolveEnvFile>;
     try {
       // Resolving can call `homedir`, which throws when the daemon user has no home.
-      target = resolveEnvFile(settings.values.envFile, env, home);
+      path = resolveEnvFile(settings.values.envFile, home);
     } catch (error) {
       return { state: "unresolved", code: errorCode(error) };
     }
-    if (target === null) return { state: "relative" };
-    const { path } = target;
-    const source = target.configured ? "setting" : "default";
+    if (path === undefined) return { state: "not-configured" };
+    if (path === null) return { state: "relative" };
 
     try {
-      return { state: await withTimeout(checkShared(path), timeoutMs), path, source };
+      return { state: await withTimeout(checkShared(path), timeoutMs), path };
     } catch (error) {
       const code = errorCode(error);
-      if (code === "ENOENT" || code === "ENOTDIR") return { state: "missing", path, source };
-      return { state: "error", path, source, code };
+      if (code === "ENOENT" || code === "ENOTDIR") return { state: "missing", path };
+      return { state: "error", path, code };
     }
   };
 }

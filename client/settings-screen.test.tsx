@@ -244,7 +244,7 @@ describe("settings states", () => {
 
 describe("path editor", () => {
   beforeEach(() => {
-    rpc.mockResolvedValue({ state: "ok", path: "/home/me/agents.env", source: "setting" });
+    rpc.mockResolvedValue({ state: "ok", path: "/home/me/agents.env" });
   });
 
   it("seeds the input with the saved path and explains the rules", async () => {
@@ -256,7 +256,8 @@ describe("path editor", () => {
       error: null,
     });
     expect(input().props["hint"]).toContain("next session open");
-    expect(input().props["hint"]).toContain("default path");
+    expect(input().props["hint"]).toContain("Leave empty to inject nothing");
+    expect(input().props["placeholder"]).toBe("e.g. ~/.env");
     expect(has("SettingsAction", "Save")).toBe(false);
   });
 
@@ -426,7 +427,7 @@ describe("status row", () => {
   }
 
   it("calls the status RPC with an empty input", async () => {
-    await statusFor({ state: "ok", path: "/a", source: "setting" });
+    await statusFor({ state: "ok", path: "/a" });
 
     expect(host.rpcContract).toBe(envFileStatus);
     expect(rpc).toHaveBeenCalledWith({});
@@ -444,29 +445,32 @@ describe("status row", () => {
     expect(statusRow().props).not.toHaveProperty("hint");
   });
 
-  it("shows the path in effect and where it comes from", async () => {
-    expect(
-      await statusFor({ state: "ok", path: "/home/me/a.env", source: "setting" }),
-    ).toMatchObject({
+  it("shows the path in effect", async () => {
+    expect(await statusFor({ state: "ok", path: "/home/me/a.env" })).toMatchObject({
       label: "File found",
-      hint: "/home/me/a.env (from the setting)",
+      hint: "/home/me/a.env",
       error: null,
       disabled: false,
     });
     await act(async () => root.unmount());
     root = createRoot();
     queryClient.clear();
-    const missing = await statusFor({ state: "missing", path: "/x/.env", source: "default" });
-    expect(missing).toMatchObject({ label: "File not found", hint: "/x/.env (default path)" });
+    const missing = await statusFor({ state: "missing", path: "/x/.env" });
+    expect(missing).toMatchObject({ label: "File not found", hint: "/x/.env" });
     expect(missing["error"]).toContain("Nothing is injected");
   });
 
+  it("shows an unset path as not configured, not as an error", async () => {
+    expect(await statusFor({ state: "not-configured" })).toMatchObject({
+      label: "Not configured",
+      hint: "Set a path to inject its variables into new sessions.",
+      error: null,
+    });
+  });
+
   it.each([
-    [{ state: "not-file", path: "/d", source: "setting" }, "Not a regular file"],
-    [
-      { state: "error", path: "/d", source: "setting", code: "EACCES" },
-      "File check failed: EACCES",
-    ],
+    [{ state: "not-file", path: "/d" }, "Not a regular file"],
+    [{ state: "error", path: "/d", code: "EACCES" }, "File check failed: EACCES"],
     [{ state: "relative" }, "Path not absolute"],
     [{ state: "invalid-settings" }, "Settings invalid"],
     [{ state: "settings-unreadable" }, "Settings unreadable"],
@@ -489,31 +493,31 @@ describe("status row", () => {
   });
 
   it("strips unknown status keys and refuses a status that breaks the contract", async () => {
-    host.rpc = async () => ({ state: "ok", path: "/a.env", source: "setting", content: 1 });
+    host.rpc = async () => ({ state: "ok", path: "/a.env", content: 1 });
     await render(ready({}));
     await settle();
     expect(statusRow().props["label"]).toBe("File found");
 
-    host.rpc = async () => ({ state: "error", path: "/a.env", source: "setting", code: "x=1" });
+    host.rpc = async () => ({ state: "error", path: "/a.env", code: "x=1" });
     await call(statusRow(), "onPress");
     await settle();
     expect(statusRow().props["label"]).toBe("File check failed");
   });
 
   it("checks again on refresh, and after a save", async () => {
-    rpc.mockResolvedValue({ state: "missing", path: "/a.env", source: "setting" });
+    rpc.mockResolvedValue({ state: "missing", path: "/a.env" });
     await render(ready({ envFile: "/a.env" }));
     expect(statusRow().props["label"]).toBe("File not found");
 
-    rpc.mockResolvedValue({ state: "ok", path: "/a.env", source: "setting" });
+    rpc.mockResolvedValue({ state: "ok", path: "/a.env" });
     await call(statusRow(), "onPress");
     expect(rpc).toHaveBeenCalledTimes(2);
     expect(statusRow().props["label"]).toBe("File found");
 
-    rpc.mockResolvedValue({ state: "ok", path: "/b.env", source: "setting" });
+    rpc.mockResolvedValue({ state: "ok", path: "/b.env" });
     await act(async () => setSettings(ready({ envFile: "/b.env" }, "r2")));
     await settle();
     expect(rpc).toHaveBeenCalledTimes(3);
-    expect(statusRow().props["hint"]).toBe("/b.env (from the setting)");
+    expect(statusRow().props["hint"]).toBe("/b.env");
   });
 });
