@@ -16,12 +16,38 @@ interface Parser {
 
 /** The host-provided state this test drives: the settings document and one stub per RPC name. */
 const host = vi.hoisted(() => {
-  const state: { settings: unknown; rpcs: Map<string, (input: unknown) => Promise<unknown>> } = {
+  const state: {
+    settings: unknown;
+    rpcs: Map<string, (input: unknown) => Promise<unknown>>;
+    appStateListeners: Set<(state: string) => void>;
+  } = {
     settings: undefined,
     rpcs: new Map(),
+    appStateListeners: new Set(),
   };
   return state;
 });
+
+// The real `react-native` can't load under Vitest, so `AppState` is a small event source the tests fire.
+vi.mock("react-native", () => ({
+  AppState: {
+    addEventListener: (event: string, listener: (state: string) => void) => {
+      if (event !== "change") throw new Error(`unexpected AppState event ${event}`);
+      host.appStateListeners.add(listener);
+      return {
+        remove: () => {
+          host.appStateListeners.delete(listener);
+        },
+      };
+    },
+  },
+}));
+
+async function setAppState(state: string) {
+  await act(async () => {
+    for (const listener of host.appStateListeners) listener(state);
+  });
+}
 
 // The SDK's client modules ship no runtime for these host pieces, so they are stood in by host elements named after them, which the tests read and press through their props.
 vi.mock("@getpaseo/plugin/client/ui", () => ({
@@ -411,6 +437,70 @@ describe("reveal", () => {
     expect(row("API_TOKEN").props["actionLabel"]).toBe("Show");
     expect(row("PATH").props["actionLabel"]).toBe("Show");
     expect(renderedText()).not.toContain(SECRET);
+  });
+
+  it("hides every value as soon as Refresh is pressed, while the list is still loading", async () => {
+    revealRpc.mockResolvedValue({ state: "ok", value: SECRET });
+    await render();
+    await press(row("API_TOKEN"));
+    const pending = deferred<EnvVarsList>();
+    listRpc.mockReturnValue(pending.promise);
+
+    await press(header());
+
+    expect(header().props["disabled"]).toBe(true);
+    expect(row("API_TOKEN").props).toMatchObject({
+      hint: `Injected\n${MASK}`,
+      actionLabel: "Show",
+    });
+    expect(renderedText()).not.toContain(SECRET);
+    await act(async () => pending.resolve(LIST));
+    await settle();
+  });
+
+  it("hides every value when Refresh fails", async () => {
+    revealRpc.mockResolvedValue({ state: "ok", value: SECRET });
+    await render();
+    await press(row("API_TOKEN"));
+    listRpc.mockRejectedValue(new Error("offline"));
+
+    await press(header());
+    await settle();
+
+    expect(listRpc).toHaveBeenCalledTimes(3);
+    expect(header().props["label"]).toBe("Variables couldn't be listed");
+    expect(row("API_TOKEN").props).toMatchObject({
+      hint: `Injected\n${MASK}`,
+      actionLabel: "Show",
+    });
+    expect(renderedText()).not.toContain(SECRET);
+  });
+
+  it("hides every value when the app leaves the foreground", async () => {
+    revealRpc.mockResolvedValue({ state: "ok", value: SECRET });
+    await render();
+    await press(row("API_TOKEN"));
+
+    await setAppState("active");
+    expect(renderedText()).toContain(SECRET);
+
+    await setAppState("inactive");
+    expect(row("API_TOKEN").props["actionLabel"]).toBe("Show");
+    expect(renderedText()).not.toContain(SECRET);
+
+    await press(row("API_TOKEN"));
+    await setAppState("background");
+    expect(renderedText()).not.toContain(SECRET);
+    expect(revealRpc).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops listening to the app state when the section unmounts", async () => {
+    await render();
+    expect(host.appStateListeners.size).toBe(1);
+
+    await leave();
+
+    expect(host.appStateListeners.size).toBe(0);
   });
 
   it("hides every value when the settings change", async () => {

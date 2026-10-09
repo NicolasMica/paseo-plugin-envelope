@@ -7,7 +7,12 @@ import type { PluginBeforeRequests } from "@getpaseo/plugin/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SECRETS_GUIDELINE, SECRETS_GUIDELINE_HEADING } from "./guideline";
-import { createEnvelopeHooks, type InjectEnvContext, type InjectEnvOptions } from "./inject-env";
+import {
+  createEnvelopeHooks,
+  type EnvSourceOptions,
+  type InjectEnvContext,
+  type InjectEnvLogOptions,
+} from "./inject-env";
 
 // Pass-through by default, so a test can stall one `open`.
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -63,7 +68,7 @@ function spyOnOutput() {
   ];
 }
 
-function makeHooks(options: Partial<InjectEnvOptions> = {}) {
+function makeHooks(options: Partial<EnvSourceOptions & InjectEnvLogOptions> = {}) {
   return createEnvelopeHooks({
     readSettings: async () => ({ status: "ready", revision: "r", values: { envFile: envPath() } }),
     log: (line) => {
@@ -101,7 +106,7 @@ function makeContext(providers: unknown = {}) {
 async function create(
   request = makeRequest(),
   providers: unknown = {},
-  options: Partial<InjectEnvOptions> = {},
+  options: Partial<EnvSourceOptions & InjectEnvLogOptions> = {},
 ) {
   const { context, get } = makeContext(providers);
   const result = await makeHooks(options).agentCreate({ request }, context);

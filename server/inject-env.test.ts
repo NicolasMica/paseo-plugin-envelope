@@ -18,7 +18,7 @@ import {
   type EnvSourceOptions,
   type EnvelopeSettingsState,
   type InjectEnvContext,
-  type InjectEnvOptions,
+  type InjectEnvLogOptions,
 } from "./inject-env";
 
 // Pass-through by default, so a test can make one `open` fail in a way the real filesystem can't.
@@ -76,7 +76,7 @@ async function writeEnv(content: string, mode = 0o600) {
   await chmod(envPath(), mode);
 }
 
-function makeHook(options: Partial<InjectEnvOptions> = {}) {
+function makeHook(options: Partial<EnvSourceOptions & InjectEnvLogOptions> = {}) {
   return createEnvelopeHooks({
     readSettings: ready(envPath()),
     log: (line) => {

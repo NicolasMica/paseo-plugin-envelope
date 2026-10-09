@@ -34,8 +34,12 @@ export interface InjectEnvLogOptions {
   platform?: NodeJS.Platform;
 }
 
-/** The hooks either share an `EnvSource` with the RPC handlers, or build their own from the source options. */
-export type InjectEnvOptions = InjectEnvLogOptions & ({ source: EnvSource } | EnvSourceOptions);
+/** The hooks either share an `EnvSource` with the RPC handlers, or build their own from the source options; never both, so a source option can't be silently ignored. */
+export type InjectEnvOptions = InjectEnvLogOptions &
+  (
+    | ({ source: EnvSource } & { [Key in keyof EnvSourceOptions]?: never })
+    | (EnvSourceOptions & { source?: never })
+  );
 
 /** The part of the hook context the hook uses, so tests can pass a fake `paseo`. */
 export interface InjectEnvContext {
@@ -215,7 +219,7 @@ export function createEnvelopeHooks(options: InjectEnvOptions) {
     warn = (line: string) => console.warn(line),
     platform = process.platform,
   } = options;
-  const source = "source" in options ? options.source : createEnvSource(options);
+  const source = options.source ?? createEnvSource(options);
   let warnedFor: string | undefined;
 
   /** The `.env` content, or null when there is nothing to inject. A quiet call neither warns nor touches the permission-warning state. */

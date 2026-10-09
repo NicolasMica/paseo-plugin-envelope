@@ -7,6 +7,7 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { AppState } from "react-native";
 
 import {
   envVarsList,
@@ -22,7 +23,7 @@ import type { SettingsSectionProps } from "./section";
 export const MASK = "••••••••";
 
 const ABOUT =
-  "Values stay on the daemon until you press Show, and are hidden again on refresh or when you leave this screen. A key passed when creating an agent (paseo run --env) wins over the .env for that creation only.";
+  "Values stay on the daemon until you press Show, and are hidden again on refresh, when the app goes to the background, or when you close this screen. A key passed when creating an agent (paseo run --env) wins over the .env for that creation only.";
 const PROVIDERS_UNAVAILABLE =
   "Provider env couldn't be checked: the Paseo config couldn't be read, so keys a provider sets may show as injected.";
 
@@ -102,6 +103,15 @@ function VariableRow({ variable: { key, status } }: { variable: EnvVariable }) {
 /** The keys of the `.env` in effect, with what each one does at the next session open. Only names and statuses go through the query cache; values are fetched one at a time by their row. */
 export function VariablesSection({ settings }: SettingsSectionProps) {
   const list = useRpc(envVarsList);
+  // Part of every row key: bumping it remounts the rows, which hides every value at once.
+  const [generation, setGeneration] = useState(0);
+  // Backgrounding hides every value, which also keeps a shown one out of the app switcher's snapshot.
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") setGeneration((value) => value + 1);
+    });
+    return () => subscription.remove();
+  }, []);
   const query = useQuery({
     queryKey: ["env-vars", settings.revision],
     queryFn: () => list({}),
@@ -137,7 +147,11 @@ export function VariablesSection({ settings }: SettingsSectionProps) {
           error={header.error ?? null}
           actionLabel="Refresh"
           disabled={query.isFetching}
-          onPress={() => run(query.refetch())}
+          onPress={() => {
+            // Hide first, so no value outlives the press, whether the refetch succeeds, fails or is slow.
+            setGeneration((value) => value + 1);
+            run(query.refetch());
+          }}
         />
         {query.isSuccess && variables.length === 0 ? (
           <SettingsRow
@@ -146,8 +160,11 @@ export function VariablesSection({ settings }: SettingsSectionProps) {
           />
         ) : null}
         {variables.map((variable) => (
-          // Keyed on the fetch time, so every refetch remounts the rows and hides every value.
-          <VariableRow key={`${query.dataUpdatedAt}:${variable.key}`} variable={variable} />
+          // Keyed on the generation and the fetch time, so Refresh, backgrounding and every refetch (a background one included) remount the rows and hide every value.
+          <VariableRow
+            key={`${generation}:${query.dataUpdatedAt}:${variable.key}`}
+            variable={variable}
+          />
         ))}
       </SettingsCard>
     </SettingsSection>
