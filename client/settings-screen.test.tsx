@@ -257,7 +257,7 @@ describe("path editor", () => {
     });
     expect(input().props["hint"]).toContain("next session open");
     expect(input().props["hint"]).toContain("Leave empty to inject nothing");
-    expect(input().props["placeholder"]).toBe("~/.config/paseo-plugin-envelope/.env");
+    expect(input().props["placeholder"]).toBe("e.g. ~/.env");
     expect(has("SettingsAction", "Save")).toBe(false);
   });
 
