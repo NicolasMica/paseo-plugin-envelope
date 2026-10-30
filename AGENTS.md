@@ -34,3 +34,31 @@ gh api graphql -f query='{user(login:"NicolasMica"){projectV2(number:4){items(fi
 ## Changing the order
 
 Use the `updateProjectV2ItemPosition` mutation with the project id (`gh project view 4 --owner NicolasMica --format json --jq .id`), the item id to move, and `afterId` set to the item it must follow (omit `afterId` to move to the top). Read the order back with the query above to check the result, and re-check after a batch of moves.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues in `NicolasMica/paseo-plugin-envelope`, tracked on the [paseo-plugin-envelope project](https://github.com/users/NicolasMica/projects/17). See `docs/agents/issue-tracker.md`: it says how to write an issue and to put every new issue on the board as part of publishing it. When you start work on an issue, for example with the `implement` skill, first assign it to yourself and move it to In progress on every board that contains it, as described there under **Starting work on an issue**.
+
+### Triage labels
+
+The five default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Verification
+
+How to run this repository, run its checks and prove a change: `docs/agents/verification.md`. Keep it current when the commands change, and extend it when a change needs a signal it does not provide yet.
+
+### Language
+
+Language: English
+
+Issues, pull request titles and bodies, GitHub comments, commit messages and human-facing docs (README, `docs/` except `docs/agents/`) are written in English. Code, identifiers and code comments stay in English.
+
+### Pull requests
+
+Pull request mode: `ready`. Once work on a branch is committed, push it and open a pull request ready for review.
