@@ -108,6 +108,7 @@ When you start working on an issue, through the `implement` skill (`/implement #
    ```
 
    A board without an In progress column prints nothing: say so to the user. When the issue is the first of its parent's children to be worked on, move the parent to In progress too, as described under **Parent issues on the board**.
+
 3. When you open the pull request, move the issue to In review on the boards that have that column, with the same command and `In review` in place of `In progress`. On a board without an In review column, the issue stays in In progress until the merge.
 
 ## Parent issues on the board
